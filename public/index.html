@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>简易用户系统</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">Web ↔ 服务器演示</p>
+      <h1>简易用户系统</h1>
+      <p class="sub">注册 / 登录后可查看团队用户列表，数据保存在服务器。</p>
+    </header>
+
+    <section id="auth-panel" class="card">
+      <div class="tabs">
+        <button type="button" class="tab active" data-tab="login">登录</button>
+        <button type="button" class="tab" data-tab="register">注册</button>
+      </div>
+
+      <form id="login-form" class="form">
+        <label>用户名<input name="username" autocomplete="username" placeholder="例如 team_demo" required /></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="至少 6 位" required /></label>
+        <button type="submit">登录</button>
+      </form>
+
+      <form id="register-form" class="form hidden">
+        <label>用户名<input name="username" autocomplete="username" placeholder="3–20 位字母数字下划线" required /></label>
+        <label>密码<input name="password" type="password" autocomplete="new-password" placeholder="至少 6 位" required /></label>
+        <button type="submit">注册并登录</button>
+      </form>
+
+      <p id="auth-msg" class="msg" aria-live="polite"></p>
+    </section>
+
+    <section id="user-panel" class="card hidden">
+      <div class="user-head">
+        <div>
+          <p class="eyebrow">当前用户</p>
+          <h2 id="current-name">-</h2>
+        </div>
+        <button type="button" id="logout-btn" class="ghost">退出登录</button>
+      </div>
+      <p class="meta">用户 ID：<code id="current-id">-</code></p>
+      <p class="meta">注册时间：<span id="current-created">-</span></p>
+
+      <div class="list-head">
+        <h3>团队用户</h3>
+        <button type="button" id="refresh-users" class="ghost">刷新</button>
+      </div>
+      <ul id="user-list" class="user-list"></ul>
+      <p id="user-msg" class="msg" aria-live="polite"></p>
+    </section>
+
+    <footer class="foot">
+      <span>健康检查：</span>
+      <code id="health">检测中…</code>
+    </footer>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>
