@@ -1,0 +1,29 @@
+# SourceTree 等 GUI 不会加载 nvm，默认 PATH 里没有 node / npx
+if ! command -v node >/dev/null 2>&1; then
+  NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -f "$NVM_DIR/alias/default" ]; then
+    ver=$(tr -d '[:space:]' < "$NVM_DIR/alias/default")
+    i=0
+    while [ -f "$NVM_DIR/alias/$ver" ] && [ "$i" -lt 5 ]; do
+      ver=$(tr -d '[:space:]' < "$NVM_DIR/alias/$ver")
+      i=$((i + 1))
+    done
+    case "$ver" in
+      v*) node_bin="$NVM_DIR/versions/node/$ver/bin" ;;
+      *) node_bin="$NVM_DIR/versions/node/v$ver/bin" ;;
+    esac
+    if [ -x "$node_bin/node" ]; then
+      export PATH="$node_bin:$PATH"
+    fi
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+  fi
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "husky - 找不到 node。当前 Git 客户端没有加载 nvm / Homebrew 的 Node。" >&2
+  exit 127
+fi
+
+commitlint --edit "$1"

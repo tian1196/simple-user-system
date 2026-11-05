@@ -1,0 +1,16 @@
+{
+  "header": "# 更新日志\n\n本文件由约定式提交自动生成。`feat` 升次版本，`fix` 升修订版本。\n\n",
+  "types": [
+    { "type": "feat", "section": "新功能" },
+    { "type": "fix", "section": "修复" },
+    { "type": "perf", "section": "性能" },
+    { "type": "refactor", "section": "重构" },
+    { "type": "docs", "section": "文档" },
+    { "type": "test", "section": "测试" },
+    { "type": "revert", "section": "回退" },
+    { "type": "style", "section": "格式", "hidden": true },
+    { "type": "chore", "section": "杂项", "hidden": true },
+    { "type": "build", "section": "构建", "hidden": true },
+    { "type": "ci", "section": "持续集成", "hidden": true }
+  ]
+}
