@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const express = require('express')
@@ -285,6 +286,17 @@ api.get('/health/ready', handle((req, res) => {
 }))
 
 app.use('/api/v1', api)
+
+// Vue 管理后台：构建产物存在时挂到 /admin，否则继续使用旧版页面
+const adminDist = process.env.ADMIN_DIST
+  ? path.resolve(process.env.ADMIN_DIST)
+  : path.join(__dirname, '..', 'web', 'dist')
+const adminIndex = path.join(adminDist, 'index.html')
+if (fs.existsSync(adminIndex)) {
+  app.use('/admin', express.static(adminDist))
+  app.get(['/admin', '/admin/*'], (_req, res) => res.sendFile(adminIndex))
+}
+
 app.use(express.static(publicDir))
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next()

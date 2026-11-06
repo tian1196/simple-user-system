@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server/index.js",
     "dev": "node --env-file-if-exists=.env server/index.js",
+    "admin:dev": "npm --prefix web run dev",
+    "admin:build": "npm --prefix web run build",
     "pack": "sh scripts/pack.sh",
     "upload": "sh scripts/upload.sh",
     "prepare": "husky",
