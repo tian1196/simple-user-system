@@ -5,7 +5,7 @@ const express = require('express')
 const db = require('./db')
 
 const app = express()
-const PORT = Number(process.env.PORT) || 80
+const PORT = Number(process.env.PORT) || 3000
 const publicDir = path.join(__dirname, '..', 'public')
 
 app.disable('x-powered-by')
@@ -26,7 +26,7 @@ function cookieValue(req, name) {
 }
 
 function setSessionCookie(res, name, token, maxAge) {
-  res.setHeader('Set-Cookie', `${name}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`)
+  res.setHeader('Set-Cookie', `${name}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`)
 }
 
 function clearSessionCookie(res, name) {
@@ -58,7 +58,8 @@ function sameOrigin(req, res, next) {
   const origin = req.headers.origin
   if (!origin) return next()
   const expected = `${req.protocol}://${req.get('host')}`
-  if (origin !== expected) return fail(req, res, 403, 'FORBIDDEN', '请求来源不正确')
+  const allowed = (process.env.APP_ORIGINS || expected).split(',').map(value => value.trim())
+  if (!allowed.includes(origin)) return fail(req, res, 403, 'FORBIDDEN', '请求来源不正确')
   next()
 }
 
@@ -276,6 +277,13 @@ api.get('/admin/audit-logs', requireAdmin, requireOwner, handle((req, res) => {
   send(req, res, { items: db.listAudit() })
 }))
 
+api.get('/health/ready', handle((req, res) => {
+  const { openDatabase, checkDatabase } = require('./database-tools')
+  const store = openDatabase(db.databasePath)
+  try { res.json({ ok: true, database: checkDatabase(store.connection) }) }
+  finally { store.connection.close() }
+}))
+
 app.use('/api/v1', api)
 app.use(express.static(publicDir))
 app.get('*', (req, res, next) => {
@@ -287,7 +295,7 @@ function siteUrl(host) {
   return PORT === 80 ? `http://${host}/` : `http://${host}:${PORT}/`
 }
 
-const server = app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, process.env.HOST || '127.0.0.1', () => {
   console.log(`设备台账已挂在 IP 根目录: ${siteUrl('127.0.0.1')}`)
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries || []) {

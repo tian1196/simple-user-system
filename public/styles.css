@@ -95,3 +95,9 @@ th{background:#f5f6f7;color:#616970;font-weight:500}
   .kv{grid-template-columns:90px 1fr}
   .card{padding:19px}
 }
+button:disabled { opacity: .55; cursor: wait; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+a { color: var(--accent); }
+.privacy-check { display: block; line-height: 1.8; }
+.privacy-check input { width: auto; margin-right: 8px; }
+#device-form { margin-top: 18px; }

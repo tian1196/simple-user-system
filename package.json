@@ -5,17 +5,20 @@
   "description": "个人设备保修与维护台账",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "PORT=3000 node server/index.js",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "dev": "node --env-file-if-exists=.env server/index.js",
     "pack": "sh scripts/pack.sh",
     "upload": "sh scripts/upload.sh",
     "prepare": "husky",
     "commit": "cz",
-    "release": "commit-and-tag-version"
+    "release": "commit-and-tag-version",
+    "db:init": "node --env-file-if-exists=.env scripts/db-init.js",
+    "db:check": "node --env-file-if-exists=.env scripts/db-check.js",
+    "invite:create": "node --env-file-if-exists=.env scripts/create-invite.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.10.0",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "uuid": "^11.0.5"
@@ -32,5 +35,8 @@
     "commitizen": {
       "path": "cz-conventional-changelog"
     }
+  },
+  "engines": {
+    "node": ">=24.13.0 <25"
   }
 }

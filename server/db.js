@@ -2,7 +2,8 @@ const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const bcrypt = require('bcryptjs')
-const Database = require('better-sqlite3')
+const { DatabaseSync } = require('node:sqlite')
+const { openDatabase, transaction } = require('./database-tools')
 const dates = require('./dates')
 
 /**
@@ -22,10 +23,11 @@ const POLICY_VERSION = '2026-11-05'
 
 fs.mkdirSync(path.dirname(databasePath), { recursive: true })
 
-const database = new Database(databasePath)
-database.pragma('journal_mode = WAL')
-database.pragma('foreign_keys = ON')
-database.pragma('busy_timeout = 5000')
+const database = process.env.DATABASE_PATH
+  ? openDatabase(databasePath).connection
+  : new DatabaseSync(databasePath)
+database.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;')
+database.transaction = callback => () => transaction(database, callback)
 
 const CATEGORIES = {
   appliance: '家电',
@@ -367,7 +369,7 @@ function registerWithInvite({ inviteCode, username, password, policyVersion }, m
         VALUES (?, ?, 'user', 'active', ?, ?, 1)
       `).run(userId, name, now, now)
     } catch (error) {
-      if (String(error.code || '').startsWith('SQLITE_CONSTRAINT')) throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
+      if (/UNIQUE constraint failed: users.username/.test(error.message)) throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
       throw error
     }
     database.prepare(`

@@ -5,3 +5,8 @@ data/*.sqlite
 data/*.sqlite-wal
 data/*.sqlite-shm
 .DS_Store
+
+.env
+data/*.sqlite*
+data/*.db*
+coverage/
