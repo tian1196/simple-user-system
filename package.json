@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "PORT=3000 node server/index.js",
+    "pack": "sh scripts/pack.sh",
+    "upload": "sh scripts/upload.sh",
     "prepare": "husky",
     "commit": "cz",
     "release": "commit-and-tag-version"

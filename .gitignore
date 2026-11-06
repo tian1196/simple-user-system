@@ -1,4 +1,5 @@
 node_modules/
+dist/
 data/users.json
 data/*.sqlite
 data/*.sqlite-wal
