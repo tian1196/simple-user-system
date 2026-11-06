@@ -10,3 +10,4 @@ data/*.sqlite-shm
 data/*.sqlite*
 data/*.db*
 coverage/
+package-lock.json
