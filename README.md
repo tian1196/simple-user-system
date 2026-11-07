@@ -55,7 +55,7 @@ npm start
 - `/auth/recover`、`/auth/reauth`、`/auth/password` 和 `/me` 账户注销。
 - `/devices`、`/devices/:id`、`/devices/:id/plans`、`/plans/:id`、`/plans/:id/completions`、`/devices/:id/logs`、`/logs/:id/void`。
 - `/due-items`、`/exports/account`、`/exports/calendar`。
-- `/admin/auth/login`、`/admin/overview`、`/admin/users`、`/admin/invites`、`/admin/settings`、`/admin/audit-logs`。
+- `/admin/auth/login`、`/admin/overview`、`/admin/users`、`/admin/invites`、`/admin/accounts`、`/admin/settings`、`/admin/audit-logs`。
 - `/api/health` 为存活检查；`/api/v1/health/ready` 查询并验证实际 schema 1 数据库。
 
 业务响应为 `{ data, request_id }`，错误为 `{ error: { code, message }, request_id }`。注册隐私版本为 `2026-11-05`，密码要求沿用完整业务版的 8–128 字符。CLI 邀请码会统一大写以匹配注册逻辑。
@@ -77,14 +77,14 @@ npm run commit
 npm run release
 ```
 
-测试覆盖显式初始化保护、数据库检查、CLI 邀请注册、重复用户名、来源校验、设备与维护计划、版本冲突、重启持久会话和退出。保留 Husky、Commitlint、Commitizen 和版本发布配置。
+测试覆盖显式初始化保护、数据库检查、CLI 邀请注册、重复用户名、来源校验、设备与维护计划、版本冲突、重启持久会话、退出，以及管理员账号增删改查、权限边界和自助保护。保留 Husky、Commitlint、Commitizen 和版本发布配置。
 
 ## 管理后台前端（web/）
 
 - 技术栈：Vue 3、TypeScript、Vite、Element Plus、Pinia、Vue Router、Axios。
 - 开发地址：`http://127.0.0.1:5173/admin/`；生产构建后：`http://127.0.0.1:3000/admin/`。
-- 页面：登录、运营概览、账号管理、邀请管理、运营配置（仅所有者）、操作审计（仅所有者）。
-- 登录态：后端 HttpOnly Cookie，401 自动清理并回跳登录页；账号状态与配置修改使用版本号处理并发冲突。
+- 页面：登录、运营概览、账号管理、邀请管理、系统账号（仅所有者）、运营配置（仅所有者）、操作审计（仅所有者）。
+- 登录态：后端 HttpOnly Cookie，401 自动清理并回跳登录页；账号状态、系统账号与配置修改使用版本号处理并发冲突。
 - 动态码：当前后端只校验 6 位数字，尚未接入真实 TOTP，登录页与文档均已标注。
 
 启动、构建、目录结构与部署细节见 [web/README.md](web/README.md)。

@@ -55,6 +55,7 @@ npm run admin:build
 | 运营概览 | `/dashboard` | 用户数、设备数、近 7 日新增、注册与写入状态、快捷入口 | 所有管理员 |
 | 账号管理 | `/users`、`/users/:id` | 搜索、状态筛选、分页、详情抽屉、停用 / 恢复；保留旧后台深链接 | 所有管理员 |
 | 邀请管理 | `/invites` | 列表、使用进度、创建邀请、明文仅展示一次、撤销 | 所有管理员 |
+| 系统账号 | `/accounts` | 管理员账号增删改查、角色与状态、重置密码 | 仅所有者 |
 | 运营配置 | `/settings` | 注册开关、业务写入开关、二次确认、版本冲突处理 | 仅所有者 |
 | 操作审计 | `/audit` | 最近 50 条、关键词 / 动作 / 结果筛选 | 仅所有者 |
 | 404 | 兜底路由 | 返回上一页 / 回到概览 | 公开 |
@@ -69,7 +70,8 @@ web/
 │   ├── api/                 # Axios 实例与按领域拆分的接口模块
 │   │   ├── request.ts       # 解包 { data, request_id }、401 / 业务错误处理
 │   │   ├── auth.ts          # 登录、退出、当前管理员
-│   │   ├── users.ts         # 账号查询与状态变更
+│   │   ├── users.ts         # 普通账号查询与状态变更
+│   │   ├── accounts.ts      # 管理员账号增删改查、重置密码
 │   │   ├── invites.ts       # 邀请创建与撤销
 │   │   ├── settings.ts      # 运营配置读写
 │   │   ├── audit.ts         # 审计日志
@@ -81,7 +83,7 @@ web/
 │   ├── styles/              # 全局样式与 Element Plus 变量覆盖
 │   ├── types/               # 环境变量、路由 meta、axios 扩展、自动导入声明
 │   ├── utils/               # 时间格式化、复制、401 事件总线
-│   ├── views/               # 登录、概览、账号、邀请、配置、审计、404
+│   ├── views/               # 登录、概览、账号、邀请、系统账号、配置、审计、404
 │   ├── App.vue              # Element Plus 中文 locale
 │   └── main.ts              # 应用入口、全局 401 退出处理
 ├── public/favicon.svg
@@ -103,11 +105,26 @@ web/
 - 解包 `data`，页面拿到的就是业务对象；
 - 401：清理本地登录态并跳转登录页，同时带上 `redirect` 参数；
 - 403 / 409 / 422 / 5xx：优先展示后端 `error.message`；
-- 409 `VERSION_CONFLICT`：页面刷新后重试（账号状态、配置开关都带 `version` 乐观锁）；
+- 409 `VERSION_CONFLICT`：页面刷新后重试（账号状态、管理员账号、配置开关都带 `version` 乐观锁）；
 - 网络错误 / 超时：给出可读提示；
 - 登录与启动会话探测使用 `silent` / `skipAuthHandler`，避免多余的全局提示。
 
 新增接口时，建议在 `src/api/` 下按领域新增模块，复用 `request<T>()`，并把后端字段补进 `types.ts`。
+
+## 系统账号
+
+`/accounts` 页面用于管理可以登录后台的 `owner` / `operator` 账号：
+
+- 仅所有者可访问接口与页面；
+- 可新增管理员、调整角色、启用/停用、重置密码、删除账号；
+- 不能停用、降级或删除当前登录账号；
+- 至少保留一个启用状态的所有者，否则会拒绝操作；
+- 停用或删除账号会撤销其后台会话；重置他人密码也会撤销其会话，重置自己的密码会保留当前会话；
+- 新增、修改、重置密码和删除都会写入操作审计。
+
+管理员账号与普通业务账号共用 `users` / `auth_identities` 表，但后台账号接口只处理 `owner` / `operator` 角色，不会混入普通用户的设备数据。
+
+接口：`GET/POST /admin/accounts`、`PATCH /admin/accounts/:id`、`PUT /admin/accounts/:id/password`、`DELETE /admin/accounts/:id`，全部要求 `owner` 权限。
 
 ## 权限
 
@@ -116,7 +133,7 @@ web/
 - 页面内敏感动作再结合 `authStore.isOwner` 做展示控制；
 - 权限判断只是前端体验，真实权限仍由后端 `requireAdmin` / `requireOwner` 兜底。
 
-运营者（operator）账号可访问概览、账号、邀请；所有者（owner）额外拥有配置与审计权限。
+运营者（operator）账号可访问概览、普通账号与邀请；所有者（owner）额外拥有系统账号、配置与审计权限。
 
 ## 环境变量
 

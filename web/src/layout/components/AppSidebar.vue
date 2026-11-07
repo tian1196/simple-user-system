@@ -2,7 +2,15 @@
 import type { Component } from 'vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { Document, Notebook, Odometer, Setting, Ticket, User } from '@element-plus/icons-vue'
+import {
+  Avatar,
+  Document,
+  Notebook,
+  Odometer,
+  Setting,
+  Ticket,
+  User,
+} from '@element-plus/icons-vue'
 
 import type { AdminRole } from '@/api/types'
 import { useAppStore } from '@/stores/app'
@@ -19,6 +27,7 @@ const menu: MenuEntry[] = [
   { path: '/dashboard', title: '运营概览', icon: Odometer, roles: ['owner', 'operator'] },
   { path: '/users', title: '账号管理', icon: User, roles: ['owner', 'operator'] },
   { path: '/invites', title: '邀请管理', icon: Ticket, roles: ['owner', 'operator'] },
+  { path: '/accounts', title: '系统账号', icon: Avatar, roles: ['owner'] },
   { path: '/settings', title: '运营配置', icon: Setting, roles: ['owner'] },
   { path: '/audit', title: '操作审计', icon: Document, roles: ['owner'] },
 ]

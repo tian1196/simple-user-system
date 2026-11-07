@@ -251,6 +251,42 @@ api.patch('/admin/users/:id/status', requireAdmin, handle((req, res) => {
   send(req, res, db.setUserStatus(req.user.id, req.params.id, req.body.status, req.body.version, meta(req)))
 }))
 
+api.get('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
+  send(req, res, { items: db.listAdminAccounts() })
+}))
+
+api.post('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
+  send(req, res, db.createAdminAccount(req.user.id, {
+    username: req.body.username,
+    password: req.body.password,
+    role: req.body.role,
+  }, meta(req)), 201)
+}))
+
+api.patch('/admin/accounts/:id', requireAdmin, requireOwner, handle((req, res) => {
+  send(req, res, db.updateAdminAccount(req.user.id, req.params.id, {
+    role: req.body.role,
+    status: req.body.status,
+    version: req.body.version,
+  }, meta(req)))
+}))
+
+api.put('/admin/accounts/:id/password', requireAdmin, requireOwner, handle((req, res) => {
+  send(req, res, db.resetAdminPassword(
+    req.user.id,
+    req.params.id,
+    req.body.password,
+    req.body.version,
+    meta(req),
+    req.sessionToken,
+  ))
+}))
+
+api.delete('/admin/accounts/:id', requireAdmin, requireOwner, handle((req, res) => {
+  db.deleteAdminAccount(req.user.id, req.params.id, req.body.version, meta(req))
+  res.status(204).end()
+}))
+
 api.get('/admin/invites', requireAdmin, handle((req, res) => {
   send(req, res, { items: db.listInvites() })
 }))

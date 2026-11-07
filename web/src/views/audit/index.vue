@@ -22,12 +22,17 @@ const ACTION_LABELS: Record<string, string> = {
   invite_create: '创建邀请',
   invite_revoke: '撤销邀请',
   settings_update: '修改运营配置',
+  admin_create: '创建管理员账号',
+  admin_update: '修改管理员账号',
+  admin_password_reset: '重置管理员密码',
+  admin_delete: '删除管理员账号',
 }
 
 const TARGET_LABELS: Record<string, string> = {
   user: '账号',
   invite: '邀请',
   setting: '配置',
+  admin: '管理员',
 }
 
 const appStore = useAppStore()

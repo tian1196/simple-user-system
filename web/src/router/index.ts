@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '邀请管理' },
       },
       {
+        path: 'accounts',
+        name: 'Accounts',
+        component: () => import('@/views/accounts/index.vue'),
+        meta: { title: '系统账号', roles: ['owner'] },
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),

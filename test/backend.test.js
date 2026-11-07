@@ -67,4 +67,109 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal(admin.response.status, 200, JSON.stringify(admin.body))
   cookie = admin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/overview')).response.status, 200)
+
+  const ownerCookie = cookie
+  const accountsBefore = await request('/admin/accounts')
+  assert.equal(accountsBefore.response.status, 200)
+  assert.equal(accountsBefore.body.data.items.length, 1)
+  const ownerAccount = accountsBefore.body.data.items[0]
+  assert.equal(ownerAccount.role, 'owner')
+
+  const createdOperator = await request('/admin/accounts', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-123',
+    role: 'operator',
+  })
+  assert.equal(createdOperator.response.status, 201, JSON.stringify(createdOperator.body))
+  const operator = createdOperator.body.data
+  assert.equal(operator.role, 'operator')
+  assert.equal(operator.status, 'active')
+
+  assert.equal((await request('/admin/accounts', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-123',
+    role: 'operator',
+  })).response.status, 409)
+  assert.equal((await request('/admin/accounts', 'POST', {
+    username: 'bad_admin',
+    password: 'bad-admin-password',
+    role: 'user',
+  })).response.status, 400)
+
+  const operatorLogin = await request('/admin/auth/login', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-123',
+    totp: '123456',
+  })
+  assert.equal(operatorLogin.response.status, 200, JSON.stringify(operatorLogin.body))
+  cookie = operatorLogin.response.headers.get('set-cookie').split(';')[0]
+  assert.equal((await request('/admin/accounts')).response.status, 403)
+  cookie = ownerCookie
+
+  assert.equal((await request(`/admin/accounts/${operator.id}`, 'PATCH', {
+    status: 'disabled',
+    version: 999,
+  })).response.status, 409)
+
+  const disabled = await request(`/admin/accounts/${operator.id}`, 'PATCH', {
+    status: 'disabled',
+    version: operator.version,
+  })
+  assert.equal(disabled.response.status, 200, JSON.stringify(disabled.body))
+  assert.equal(disabled.body.data.status, 'disabled')
+  assert.equal((await request('/admin/auth/login', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-123',
+    totp: '123456',
+  })).response.status, 403)
+
+  const enabled = await request(`/admin/accounts/${operator.id}`, 'PATCH', {
+    status: 'active',
+    version: disabled.body.data.version,
+  })
+  assert.equal(enabled.response.status, 200, JSON.stringify(enabled.body))
+
+  const reset = await request(`/admin/accounts/${operator.id}/password`, 'PUT', {
+    password: 'ops-password-456',
+    version: enabled.body.data.version,
+  })
+  assert.equal(reset.response.status, 200, JSON.stringify(reset.body))
+  assert.equal((await request('/admin/auth/login', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-123',
+    totp: '123456',
+  })).response.status, 401)
+  assert.equal((await request('/admin/auth/login', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-456',
+    totp: '123456',
+  })).response.status, 200)
+
+  assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'PATCH', {
+    role: 'operator',
+    version: ownerAccount.version,
+  })).response.status, 409)
+  assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'PATCH', {
+    status: 'disabled',
+    version: ownerAccount.version,
+  })).response.status, 409)
+  assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'DELETE', {
+    version: ownerAccount.version,
+  })).response.status, 409)
+
+  const secondOwner = await request('/admin/accounts', 'POST', {
+    username: 'owner_two',
+    password: 'owner-two-password',
+    role: 'owner',
+  })
+  assert.equal(secondOwner.response.status, 201, JSON.stringify(secondOwner.body))
+  assert.equal((await request(`/admin/accounts/${secondOwner.body.data.id}`, 'DELETE', {
+    version: secondOwner.body.data.version,
+  })).response.status, 204)
+
+  assert.equal((await request(`/admin/accounts/${operator.id}`, 'DELETE', {
+    version: reset.body.data.version,
+  })).response.status, 204)
+  const accountsAfter = await request('/admin/accounts')
+  assert.equal(accountsAfter.body.data.items.length, 1)
 })

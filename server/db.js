@@ -932,6 +932,187 @@ function setUserStatus(actorId, userId, status, version, meta) {
   return adminUser(userId)
 }
 
+function adminAccount(userId) {
+  const row = database.prepare(`
+    SELECT id, username, role, status, created_at, last_login_at, version
+    FROM users
+    WHERE id = ? AND role IN ('owner', 'operator')
+  `).get(userId)
+  if (!row) throw fail(404, 'NOT_FOUND', '管理员账号不存在')
+  return row
+}
+
+function listAdminAccounts() {
+  return database.prepare(`
+    SELECT id, username, role, status, created_at, last_login_at, version
+    FROM users
+    WHERE role IN ('owner', 'operator')
+    ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at ASC
+  `).all()
+}
+
+function countOtherActiveOwners(excludeId) {
+  return database.prepare(`
+    SELECT COUNT(*) AS n FROM users
+    WHERE role = 'owner' AND status = 'active' AND id <> ?
+  `).get(excludeId).n
+}
+
+function assertActiveOwnerPreserved(account, nextRole, nextStatus) {
+  if (account.role !== 'owner' || account.status !== 'active') return
+  if (nextRole === 'owner' && nextStatus === 'active') return
+  if (countOtherActiveOwners(account.id) === 0) {
+    throw fail(409, 'LAST_OWNER', '至少需要保留一个启用状态的所有者')
+  }
+}
+
+function assertValidAdminRole(role) {
+  if (!['owner', 'operator'].includes(role)) {
+    throw fail(400, 'VALIDATION_ERROR', '管理员角色只能是 owner 或 operator')
+  }
+}
+
+function assertAdminPassword(password) {
+  if (password.length < 8 || password.length > 128) {
+    throw fail(400, 'VALIDATION_ERROR', '密码长度需为 8–128 位')
+  }
+}
+
+function createAdminAccount(actorId, { username, password, role }, meta) {
+  const name = normalizeUsername(username)
+  if (!/^[a-z0-9_]{4,32}$/.test(name)) throw fail(400, 'VALIDATION_ERROR', '用户名需为 4–32 位小写字母、数字或下划线')
+  const passwordText = String(password || '')
+  assertAdminPassword(passwordText)
+  const nextRole = String(role || '')
+  assertValidAdminRole(nextRole)
+
+  const now = Date.now()
+  const userId = crypto.randomUUID()
+  const tx = database.transaction(() => {
+    try {
+      database.prepare(`
+        INSERT INTO users (id, username, role, status, created_at, updated_at, version)
+        VALUES (?, ?, ?, 'active', ?, ?, 1)
+      `).run(userId, name, nextRole, now, now)
+    } catch (error) {
+      if (/UNIQUE constraint failed: users.username/.test(error.message)) {
+        throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
+      }
+      throw error
+    }
+    database.prepare(`
+      INSERT INTO auth_identities (
+        id, user_id, provider, provider_key, password_hash, recovery_code_hash, created_at, updated_at
+      ) VALUES (?, ?, 'password', ?, ?, NULL, ?, ?)
+    `).run(crypto.randomUUID(), userId, name, bcrypt.hashSync(passwordText, 10), now, now)
+  })
+  tx()
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'admin_create',
+    targetType: 'admin',
+    targetId: userId,
+    result: 'success',
+    detail: { role: nextRole },
+  })
+  return adminAccount(userId)
+}
+
+function updateAdminAccount(actorId, userId, { role, status, version }, meta) {
+  const account = adminAccount(userId)
+  if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+
+  const nextRole = role === undefined ? account.role : String(role)
+  const nextStatus = status === undefined ? account.status : String(status)
+  assertValidAdminRole(nextRole)
+  if (!['active', 'disabled'].includes(nextStatus)) throw fail(400, 'VALIDATION_ERROR', '状态不正确')
+
+  if (account.id === actorId) {
+    if (nextRole !== account.role) throw fail(409, 'SELF_ACTION', '不能修改当前登录账号的角色')
+    if (nextStatus === 'disabled') throw fail(409, 'SELF_ACTION', '不能停用当前登录账号')
+  }
+  assertActiveOwnerPreserved(account, nextRole, nextStatus)
+
+  const now = Date.now()
+  const result = database.prepare(`
+    UPDATE users
+    SET role = ?, status = ?, updated_at = ?, version = version + 1
+    WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+  `).run(nextRole, nextStatus, now, userId, account.version)
+  if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+  if (nextStatus === 'disabled') database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'admin_update',
+    targetType: 'admin',
+    targetId: userId,
+    result: 'success',
+    detail: { role: nextRole, status: nextStatus },
+  })
+  return adminAccount(userId)
+}
+
+function resetAdminPassword(actorId, userId, password, version, meta, keepToken = '') {
+  const account = adminAccount(userId)
+  if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+  const passwordText = String(password || '')
+  assertAdminPassword(passwordText)
+  const identity = database.prepare(`
+    SELECT id FROM auth_identities WHERE user_id = ? AND provider = 'password'
+  `).get(userId)
+  if (!identity) throw fail(404, 'NOT_FOUND', '管理员登录凭据不存在')
+
+  const now = Date.now()
+  const tx = database.transaction(() => {
+    const updated = database.prepare(`
+      UPDATE users SET updated_at = ?, version = version + 1
+      WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+    `).run(now, userId, account.version)
+    if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+    database.prepare(`
+      UPDATE auth_identities SET password_hash = ?, recovery_code_hash = NULL, updated_at = ? WHERE id = ?
+    `).run(bcrypt.hashSync(passwordText, 10), now, identity.id)
+    if (userId === actorId && keepToken) {
+      database.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?').run(userId, sha256(keepToken))
+    } else {
+      database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+    }
+  })
+  tx()
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'admin_password_reset',
+    targetType: 'admin',
+    targetId: userId,
+    result: 'success',
+    detail: { self: userId === actorId },
+  })
+  return adminAccount(userId)
+}
+
+function deleteAdminAccount(actorId, userId, version, meta) {
+  const account = adminAccount(userId)
+  if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+  if (account.id === actorId) throw fail(409, 'SELF_ACTION', '不能删除当前登录账号')
+  assertActiveOwnerPreserved(account, null, null)
+  const result = database.prepare(`
+    DELETE FROM users WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+  `).run(userId, account.version)
+  if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'admin_delete',
+    targetType: 'admin',
+    targetId: userId,
+    result: 'success',
+    detail: { username: account.username, role: account.role },
+  })
+}
+
 function listInvites() {
   return database.prepare(`
     SELECT id, max_uses, used_count, expires_at, revoked_at, created_at
@@ -1038,6 +1219,12 @@ module.exports = {
   listAdminUsers,
   adminUser,
   setUserStatus,
+  adminAccount,
+  listAdminAccounts,
+  createAdminAccount,
+  updateAdminAccount,
+  resetAdminPassword,
+  deleteAdminAccount,
   listInvites,
   createInvite,
   revokeInvite,

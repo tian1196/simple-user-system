@@ -32,6 +32,28 @@ export interface Overview {
   backup_at: string | null
 }
 
+export interface AdminAccountItem {
+  id: string
+  username: string
+  role: AdminRole
+  status: UserStatus
+  created_at: number
+  last_login_at: number | null
+  version: number
+}
+
+export interface CreateAdminAccountPayload {
+  username: string
+  password: string
+  role: AdminRole
+}
+
+export interface UpdateAdminAccountPayload {
+  role?: AdminRole
+  status?: UserStatus
+  version: number
+}
+
 export interface AdminUserItem {
   id: string
   username: string
