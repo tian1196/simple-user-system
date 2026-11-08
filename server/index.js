@@ -1,3 +1,13 @@
+/**
+ * index.js —— HTTP 服务入口（Express）。
+ *
+ * 职责是“路由与协议”，不含业务规则：
+ *   - 注册全局中间件（JSON 解析、请求 ID、同源校验）；
+ *   - 定义 /api/v1 下的全部 REST 路由，并挂接鉴权中间件；
+ *   - 统一响应/错误格式、Cookie 会话读写；
+ *   - 托管静态站点（public）与 Vue 管理后台构建产物（web/dist）。
+ * 真正的读写与校验都委托给 db.js。
+ */
 const crypto = require('crypto')
 const fs = require('fs')
 const os = require('os')
@@ -7,16 +17,26 @@ const db = require('./db')
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3000
+// 面向用户的旧版静态站点目录。
 const publicDir = path.join(__dirname, '..', 'public')
 
+// 隐藏技术栈指纹；限制 JSON body 大小，防止超大请求体占用内存。
 app.disable('x-powered-by')
 app.use(express.json({ limit: '16kb' }))
 
+/** 给每个请求生成唯一 ID，写入 req.id 并随响应返回，便于排查问题。 */
 function requestId(req, res, next) {
   req.id = crypto.randomUUID()
   next()
 }
 
+/**
+ * 从 Cookie 头中手动解析指定名称的 Cookie 值。
+ * 不使用额外 cookie 解析库，会话中间件只依赖它。
+ * @param {import('express').Request} req
+ * @param {string} name Cookie 名
+ * @returns {string}
+ */
 function cookieValue(req, name) {
   const raw = req.headers.cookie || ''
   for (const part of raw.split(/; */)) {
@@ -26,22 +46,53 @@ function cookieValue(req, name) {
   return ''
 }
 
+/**
+ * 下发 HttpOnly 会话 Cookie，前端 JS 无法读取以降低 XSS 窃取风险。
+ * SameSite=Lax 可阻挡大部分跨站携带；COOKIE_SECURE=true 时额外加 Secure。
+ * @param {import('express').Response} res
+ * @param {string} name Cookie 名
+ * @param {string} token 会话令牌
+ * @param {number} maxAge 有效期（秒）
+ */
 function setSessionCookie(res, name, token, maxAge) {
   res.setHeader('Set-Cookie', `${name}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`)
 }
 
+/** 让指定会话 Cookie 立即失效（清空 + Max-Age=0）。 */
 function clearSessionCookie(res, name) {
   res.setHeader('Set-Cookie', `${name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`)
 }
 
+/**
+ * 统一成功响应：{ data, request_id }。
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {*} data 业务数据
+ * @param {number} [status] HTTP 状态码
+ */
 function send(req, res, data, status = 200) {
   res.status(status).json({ data, request_id: req.id })
 }
 
+/**
+ * 统一错误响应：{ error: { code, message }, request_id }。
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {number} status HTTP 状态码
+ * @param {string} code 机器可读错误码
+ * @param {string} message 用户可读信息
+ */
 function fail(req, res, status, code, message) {
   res.status(status).json({ error: { code, message }, request_id: req.id })
 }
 
+/**
+ * handle —— 同步路由处理器的统一异常捕获包装。
+ * 把业务函数抛出的带 status 错误转成统一错误响应；
+ * 5xx 视为服务端问题，打印日志并对外隐藏具体细节。
+ * @param {(req:import('express').Request,res:import('express').Response)=>void} fn
+ * @returns {import('express').RequestHandler}
+ */
 function handle(fn) {
   return (req, res) => {
     try {
@@ -54,6 +105,11 @@ function handle(fn) {
   }
 }
 
+/**
+ * sameOrigin —— 写请求同源校验中间件。
+ * GET/HEAD 放行；浏览器会自动带 Origin，若与允许来源（APP_ORIGINS
+ * 或当前站点）不符则拒绝，用于阻挡跨站伪造写操作。
+ */
 function sameOrigin(req, res, next) {
   if (req.method === 'GET' || req.method === 'HEAD') return next()
   const origin = req.headers.origin
@@ -64,10 +120,19 @@ function sameOrigin(req, res, next) {
   next()
 }
 
+/** 从请求中提取写审计所需的最小元信息（请求 ID、来源 IP）。 */
 function meta(req) {
   return { requestId: req.id, ip: req.ip }
 }
 
+/**
+ * requireClient —— 生成会话鉴权中间件。
+ * 根据指定 Cookie 和客户端类型解析会话；无效则 401，
+ * 有效则把令牌挂到 req.sessionToken、用户挂到 req.user。
+ * @param {'web'|'admin'} clientType
+ * @param {string} cookieName
+ * @returns {import('express').RequestHandler}
+ */
 function requireClient(clientType, cookieName) {
   return (req, res, next) => {
     const session = db.sessionUser(cookieValue(req, cookieName), clientType)
@@ -78,21 +143,27 @@ function requireClient(clientType, cookieName) {
   }
 }
 
+// 用户端会话 / 管理后台会话分别使用独立 Cookie，互不干扰。
 const requireUser = requireClient('web', 'ledger_session')
 const requireAdmin = requireClient('admin', 'ledger_admin')
 
+/** requireOwner —— 在已登录管理员基础上，进一步要求角色为 owner。 */
 function requireOwner(req, res, next) {
   if (req.user.role !== 'owner') return fail(req, res, 403, 'FORBIDDEN', '只有所有者可以执行这个操作')
   next()
 }
 
+/** 最轻量存活检查：不查库，只证明进程在线。 */
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'device-ledger' })
 })
 
+// /api/v1 路由组：统一加请求 ID 和同源校验，业务路由在其下注册。
 const api = express.Router()
 api.use(requestId)
 api.use(sameOrigin)
+
+// ---------- 认证：普通用户注册 / 登录 / 退出 ----------
 
 api.post('/auth/register', handle((req, res) => {
   const result = db.registerWithInvite({
@@ -139,6 +210,8 @@ api.get('/admin/auth/me', requireAdmin, handle((req, res) => {
   send(req, res, db.publicUser(req.user))
 }))
 
+// ---------- 账户安全：恢复码找回、再验证、改密、注销 ----------
+
 api.post('/auth/recover', handle((req, res) => {
   const result = db.recoverAccount({
     username: req.body.username,
@@ -163,6 +236,8 @@ api.delete('/me', requireUser, handle((req, res) => {
   clearSessionCookie(res, 'ledger_session')
   res.status(204).end()
 }))
+
+// ---------- 设备 CRUD ----------
 
 api.get('/devices', requireUser, handle((req, res) => {
   send(req, res, db.listDevices(req.user.id))
@@ -190,6 +265,8 @@ api.delete('/devices/:id', requireUser, handle((req, res) => {
   res.status(204).end()
 }))
 
+// ---------- 维护计划 CRUD ----------
+
 api.post('/devices/:id/plans', requireUser, handle((req, res) => {
   send(req, res, db.createPlan(req.user.id, req.params.id, req.body), 201)
 }))
@@ -203,6 +280,8 @@ api.delete('/plans/:id', requireUser, handle((req, res) => {
   res.status(204).end()
 }))
 
+// ---------- 维护记录：完成 / 手动登记 / 撤销 ----------
+
 api.post('/plans/:id/completions', requireUser, handle((req, res) => {
   send(req, res, db.completePlan(req.user.id, req.params.id, req.body), 201)
 }))
@@ -214,6 +293,8 @@ api.post('/devices/:id/logs', requireUser, handle((req, res) => {
 api.post('/logs/:id/void', requireUser, handle((req, res) => {
   send(req, res, db.voidLog(req.user.id, req.params.id))
 }))
+
+// ---------- 待办与数据导出 ----------
 
 api.get('/due-items', requireUser, handle((req, res) => {
   send(req, res, db.dueItems(req.user.id, req.query.days || 30))
@@ -235,9 +316,13 @@ api.get('/exports/calendar', requireUser, handle((req, res) => {
   res.send(text)
 }))
 
+// ---------- 管理后台：概览 ----------
+
 api.get('/admin/overview', requireAdmin, handle((req, res) => {
   send(req, res, db.adminOverview())
 }))
+
+// ---------- 管理后台：普通用户管理 ----------
 
 api.get('/admin/users', requireAdmin, handle((req, res) => {
   send(req, res, { items: db.listAdminUsers({ q: req.query.q, status: req.query.status }) })
@@ -250,6 +335,8 @@ api.get('/admin/users/:id', requireAdmin, handle((req, res) => {
 api.patch('/admin/users/:id/status', requireAdmin, handle((req, res) => {
   send(req, res, db.setUserStatus(req.user.id, req.params.id, req.body.status, req.body.version, meta(req)))
 }))
+
+// ---------- 管理后台：系统账号（owner 限定） ----------
 
 api.get('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
   send(req, res, { items: db.listAdminAccounts() })
@@ -287,6 +374,8 @@ api.delete('/admin/accounts/:id', requireAdmin, requireOwner, handle((req, res) 
   res.status(204).end()
 }))
 
+// ---------- 管理后台：邀请码 ----------
+
 api.get('/admin/invites', requireAdmin, handle((req, res) => {
   send(req, res, { items: db.listInvites() })
 }))
@@ -302,6 +391,8 @@ api.post('/admin/invites/:id/revoke', requireAdmin, handle((req, res) => {
   send(req, res, db.revokeInvite(req.user.id, req.params.id, meta(req)))
 }))
 
+// ---------- 管理后台：运营配置与审计（owner 限定） ----------
+
 api.get('/admin/settings', requireAdmin, requireOwner, handle((req, res) => {
   send(req, res, { items: db.getSettings() })
 }))
@@ -314,6 +405,7 @@ api.get('/admin/audit-logs', requireAdmin, requireOwner, handle((req, res) => {
   send(req, res, { items: db.listAudit() })
 }))
 
+// 就绪检查：真正连接并校验数据库（区别于 /api/health 的纯存活检查）。
 api.get('/health/ready', handle((req, res) => {
   const { openDatabase, checkDatabase } = require('./database-tools')
   const store = openDatabase(db.databasePath)
@@ -321,6 +413,7 @@ api.get('/health/ready', handle((req, res) => {
   finally { store.connection.close() }
 }))
 
+// 挂载 /api/v1 全部路由。
 app.use('/api/v1', api)
 
 // Vue 管理后台：构建产物存在时挂到 /admin，否则继续使用旧版页面
@@ -330,15 +423,18 @@ const adminDist = process.env.ADMIN_DIST
 const adminIndex = path.join(adminDist, 'index.html')
 if (fs.existsSync(adminIndex)) {
   app.use('/admin', express.static(adminDist))
+  // SPA 深链接（/admin/users 等）统一回退到入口 index.html。
   app.get(['/admin', '/admin/*'], (_req, res) => res.sendFile(adminIndex))
 }
 
+// 旧版用户站点静态资源；其余非 API 路径回退到其入口（简单前端路由支持）。
 app.use(express.static(publicDir))
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next()
   res.sendFile(path.join(publicDir, 'index.html'))
 })
 
+/** 根据端口拼出完整站点 URL（80 端口不显示端口号）。 */
 function siteUrl(host) {
   return PORT === 80 ? `http://${host}/` : `http://${host}:${PORT}/`
 }
@@ -355,6 +451,7 @@ const server = app.listen(PORT, process.env.HOST || '127.0.0.1', () => {
   for (const message of db.bootstrapMessages) console.log(message)
 })
 
+// 统一处理监听失败，给出中文原因后退出，避免静默崩溃。
 server.on('error', (error) => {
   if (error.code === 'EACCES') {
     console.error(`无法监听 ${PORT} 端口，需要用管理员权限启动`)

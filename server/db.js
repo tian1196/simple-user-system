@@ -1,3 +1,17 @@
+/**
+ * db.js —— 数据访问层（DAL）与业务核心。
+ *
+ * 这是整个服务最大的模块，集中管理：
+ *   1. SQLite 连接初始化与表结构迁移（migrate）；
+ *   2. 账号体系：用户、所有者/运营者、会话、邀请码、恢复码；
+ *   3. 业务数据：设备、维护计划、维护记录（完成/撤销/手动登记）；
+ *   4. 待办汇总、账户导出、日历导出；
+ *   5. 管理后台：普通用户管理、管理员账号管理、运营配置、审计日志。
+ *
+ * index.js 只负责 HTTP，所有真正的读写与规则判断都调用这里导出的函数。
+ * 安全要点：口令用 bcrypt；会话令牌、邀请码、恢复码只存哈希（sha256），
+ * 明文只在生成的那一刻返回给客户端。
+ */
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
@@ -16,19 +30,24 @@ const databasePath = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, '..', 'data', 'ledger.sqlite')
 
+// 仅本地空库使用的演示账号/邀请码常量。
 const LOCAL_INVITE = 'WELCOME-2026'
 const LOCAL_OWNER = 'owner'
 const LOCAL_OWNER_PASSWORD = 'ledger-owner-2026'
+// 用户注册时必须勾选的隐私说明版本，过期版本需重新确认。
 const POLICY_VERSION = '2026-11-05'
 
 fs.mkdirSync(path.dirname(databasePath), { recursive: true })
 
+// 配置了 DATABASE_PATH 时走严格校验打开；本地默认路径允许直接新建。
 const database = process.env.DATABASE_PATH
   ? openDatabase(databasePath).connection
   : new DatabaseSync(databasePath)
 database.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;')
+// 统一事务入口：传入回调，返回一个“执行该事务”的函数。
 database.transaction = callback => () => transaction(database, callback)
 
+/** 设备分类 code -> 中文标签，输入校验与展示都依赖它。 */
 const CATEGORIES = {
   appliance: '家电',
   computer: '电脑',
@@ -37,6 +56,13 @@ const CATEGORIES = {
   other: '其他',
 }
 
+/**
+ * 构造一个带 HTTP 状态码和错误码的业务错误，
+ * 供 index.js 的 handle 捕获后转成统一错误响应。
+ * @param {number} status HTTP 状态码
+ * @param {string} code 机器可读错误码
+ * @param {string} message 用户可读信息
+ */
 function fail(status, code, message) {
   const error = new Error(message)
   error.status = status
@@ -44,23 +70,40 @@ function fail(status, code, message) {
   return error
 }
 
+/**
+ * sha256 摘要。用于给“需要保密但不需要抗暴力破解”的内容做哈希存储：
+ * 会话令牌、邀请码、恢复码。用户口令不走这里（用 bcrypt）。
+ * @param {string} value
+ * @returns {string}
+ */
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
 }
 
+/** 用户名规范化：去空白并转小写，保证登录/查重一致。 */
 function normalizeUsername(username) {
   return String(username || '').trim().toLowerCase()
 }
 
+/** 密钥类内容规范化：去空白并转大写（邀请码、恢复码不区分大小写）。 */
 function normalizeSecret(value) {
   return String(value || '').trim().toUpperCase()
 }
 
+/**
+ * 生成恢复码：RC-XXXX-XXXX-XXXX-XXXX（共 16 个十六进制字符）。
+ * 返回明文，同时库里只存它的 sha256。
+ * @returns {string}
+ */
 function makeRecoveryCode() {
   const raw = crypto.randomBytes(8).toString('hex').toUpperCase()
   return `RC-${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}`
 }
 
+/**
+ * 输出可安全返回给前端的用户公开信息（剔除内部字段）。
+ * @param {object|null} row 数据库用户行
+ */
 function publicUser(row) {
   if (!row) return null
   return {
@@ -73,8 +116,21 @@ function publicUser(row) {
   }
 }
 
+/**
+ * migrate —— 建表与初始化（幂等）。
+ *
+ * 全部使用 CREATE TABLE IF NOT EXISTS，因此每次启动都可安全执行：
+ * 已存在的表不会被修改或清空。当前没有真正的“版本升级”逻辑，
+ * 结构固定为 schema 1；需要演进时应新增迁移并同步 schema 版本。
+ *
+ * 通用约定：
+ *   - 主键 id 为 UUID 字符串；
+ *   - 业务表都带 created_at / updated_at（毫秒时间戳）和 version（乐观锁）；
+ *   - 关联关系靠外键 + ON DELETE，配合 PRAGMA foreign_keys=ON 级联。
+ */
 function migrate() {
   database.exec(`
+    -- 用户表：普通用户、运营者、所有者共用，靠 role 区分。
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
@@ -87,6 +143,7 @@ function migrate() {
       version INTEGER NOT NULL DEFAULT 1
     );
 
+    -- 登录身份/凭据：与 users 分离，便于未来扩展多种登录方式。
     CREATE TABLE IF NOT EXISTS auth_identities (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -100,6 +157,7 @@ function migrate() {
       UNIQUE (user_id, provider)
     );
 
+    -- 会话：只存令牌哈希。client_type 区分用户端 / 管理后台。
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -110,6 +168,7 @@ function migrate() {
       reauthenticated_at INTEGER
     );
 
+    -- 邀请码：只存哈希，带使用上限、过期时间和撤销标记。
     CREATE TABLE IF NOT EXISTS invite_codes (
       id TEXT PRIMARY KEY,
       code_hash TEXT NOT NULL UNIQUE,
@@ -121,6 +180,7 @@ function migrate() {
       created_at INTEGER NOT NULL
     );
 
+    -- 设备：归属于某个普通用户，分类受 CHECK 约束。
     CREATE TABLE IF NOT EXISTS devices (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -135,6 +195,7 @@ function migrate() {
       version INTEGER NOT NULL DEFAULT 1
     );
 
+    -- 维护计划：周期（天）+ 下次到期日，可暂停。
     CREATE TABLE IF NOT EXISTS maintenance_plans (
       id TEXT PRIMARY KEY,
       device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -147,6 +208,8 @@ function migrate() {
       version INTEGER NOT NULL DEFAULT 1
     );
 
+    -- 维护记录：手动登记或计划完成都会落一条，支持撤销（voided_at）。
+    -- request_key + request_fingerprint 用于幂等，防止网络重试造成重复登记。
     CREATE TABLE IF NOT EXISTS maintenance_logs (
       id TEXT PRIMARY KEY,
       device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -164,6 +227,7 @@ function migrate() {
       UNIQUE (device_id, request_key)
     );
 
+    -- 运营配置：键值形式，value 以 JSON 字符串存储。
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -172,6 +236,7 @@ function migrate() {
       updated_at INTEGER NOT NULL
     );
 
+    -- 隐私确认记录：用户对某个版本隐私说明的接受留痕。
     CREATE TABLE IF NOT EXISTS privacy_acceptances (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -180,6 +245,7 @@ function migrate() {
       UNIQUE (user_id, policy_version)
     );
 
+    -- 审计日志：记录关键操作，不含口令、恢复码等敏感正文。
     CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
       actor_user_id TEXT,
@@ -193,6 +259,7 @@ function migrate() {
       created_at INTEGER NOT NULL
     );
 
+    -- 常用查询索引：按用户/设备/到期/会话维度加速。
     CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id, created_at, id);
     CREATE INDEX IF NOT EXISTS idx_plans_device ON maintenance_plans(device_id);
     CREATE INDEX IF NOT EXISTS idx_plans_due ON maintenance_plans(status, next_due_on);
@@ -200,6 +267,7 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
   `)
 
+  // 初始化两项默认开关（INSERT OR IGNORE 保证已有时不覆盖）。
   const now = Date.now()
   const insertSetting = database.prepare(`
     INSERT OR IGNORE INTO app_settings (key, value_json, version, updated_at)
@@ -209,6 +277,13 @@ function migrate() {
   insertSetting.run('writes_enabled', now)
 }
 
+/**
+ * seedLocalAccounts —— 本地空库播种。
+ * 仅在“本地默认路径 + 完全空库”时执行：设置了 DATABASE_PATH 直接跳过，
+ * 已有用户也跳过，因此绝不会污染线上库或重复创建。
+ * 在同一事务内创建一个 owner（含口令、恢复码）和一个 90 天有效的邀请码。
+ * @returns {string[]} 要打印到终端的凭据提示
+ */
 function seedLocalAccounts() {
   if (process.env.DATABASE_PATH) return []
   const messages = []
@@ -243,16 +318,34 @@ function seedLocalAccounts() {
   return messages
 }
 
+/**
+ * 读取某个布尔开关；未配置时默认开启（true）。
+ * @param {string} key 如 registration_enabled / writes_enabled
+ * @returns {boolean}
+ */
 function settingEnabled(key) {
   const row = database.prepare('SELECT value_json FROM app_settings WHERE key = ?').get(key)
   if (!row) return true
   return JSON.parse(row.value_json) !== false
 }
 
+/** 写操作前置校验：业务写入被暂停时抛出 503（WRITES_PAUSED）。 */
 function assertWrites() {
   if (!settingEnabled('writes_enabled')) throw fail(503, 'WRITES_PAUSED', '业务写入已暂停')
 }
 
+/**
+ * writeAudit —— 写审计记录。可选字段缺省补 null，detail 对象序列化为 JSON。
+ * @param {object} entry
+ * @param {string|null} [entry.actorId] 操作者 id
+ * @param {string} entry.action 动作名
+ * @param {string} [entry.targetType] 对象类型
+ * @param {string} [entry.targetId] 对象 id
+ * @param {string} entry.result success / failure
+ * @param {string} [entry.requestId] 请求 id
+ * @param {string} [entry.ip] 来源 IP
+ * @param {object} [entry.detail] 附加结构化信息
+ */
 function writeAudit({ actorId, action, targetType, targetId, result, requestId, ip, detail }) {
   database.prepare(`
     INSERT INTO audit_logs (
@@ -272,6 +365,11 @@ function writeAudit({ actorId, action, targetType, targetId, result, requestId, 
   )
 }
 
+/**
+ * 按用户名查询其密码身份（连表带出 password_hash / recovery_code_hash）。
+ * @param {string} username
+ * @returns {object|undefined}
+ */
 function identityByUsername(username) {
   return database.prepare(`
     SELECT u.*, i.password_hash, i.recovery_code_hash, i.id AS identity_id
@@ -281,6 +379,13 @@ function identityByUsername(username) {
   `).get(normalizeUsername(username))
 }
 
+/**
+ * 创建会话并返回明文令牌（仅本次返回，库里只存哈希）。
+ * 用户端 7 天有效，管理后台 8 小时有效。
+ * @param {string} userId
+ * @param {'web'|'admin'} clientType
+ * @returns {string} 会话令牌明文
+ */
 function createSession(userId, clientType) {
   const token = crypto.randomBytes(32).toString('base64url')
   const now = Date.now()
@@ -292,6 +397,13 @@ function createSession(userId, clientType) {
   return token
 }
 
+/**
+ * 校验会话令牌并返回用户，失败返回 null。
+ * 会话过期或用户被停用时顺手删除该会话。
+ * @param {string} token 明文令牌
+ * @param {'web'|'admin'} clientType
+ * @returns {object|null}
+ */
 function sessionUser(token, clientType) {
   if (!token) return null
   const row = database.prepare(`
@@ -309,15 +421,22 @@ function sessionUser(token, clientType) {
   return row
 }
 
+/** 撤销单个会话（退出登录）。@param {string} token 明文令牌 */
 function revokeSession(token) {
   if (!token) return
   database.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token))
 }
 
+/** 记录“已重新验证口令”的时间点（导出/注销前置条件）。@param {string} token */
 function touchReauth(token) {
   database.prepare('UPDATE sessions SET reauthenticated_at = ? WHERE token_hash = ?').run(Date.now(), sha256(token))
 }
 
+/**
+ * 确认最近 5 分钟内重新验证过口令，否则抛出 403（REAUTH_REQUIRED）。
+ * 用于账户导出、注销等敏感操作。
+ * @param {string} token
+ */
 function assertReauth(token) {
   const row = database.prepare('SELECT reauthenticated_at FROM sessions WHERE token_hash = ?').get(sha256(token))
   if (!row?.reauthenticated_at || Date.now() - row.reauthenticated_at > 5 * 60 * 1000) {
@@ -325,6 +444,17 @@ function assertReauth(token) {
   }
 }
 
+/**
+ * login —— 统一登录（用户端 / 管理后台共用）。
+ * 校验 bcrypt 口令、账号状态，并按 client_type 限制角色入口：
+ * 用户端只允许普通用户，管理端只允许 owner/operator。
+ * 成功更新最近登录时间、写成功审计并下发新会话；失败写失败审计。
+ * @param {string} username
+ * @param {string} password
+ * @param {'web'|'admin'} clientType
+ * @param {{requestId:string, ip:string}} meta 请求元信息
+ * @returns {{token:string, user:object}}
+ */
 function login(username, password, clientType, meta) {
   const user = identityByUsername(username)
   const valid = user && bcrypt.compareSync(password, user.password_hash)
@@ -345,6 +475,13 @@ function login(username, password, clientType, meta) {
   return { token: createSession(user.id, clientType), user: publicUser({ ...user, last_login_at: now }) }
 }
 
+/**
+ * registerWithInvite —— 凭邀请码注册普通用户。
+ * 依次校验注册开关、用户名格式、口令长度、隐私版本，
+ * 再在事务内校验并消费邀请码、创建用户与凭据、记录隐私确认。
+ * 返回新会话、用户信息与一次性恢复码。
+ * @returns {{token:string, user:object, recovery_code:string}}
+ */
 function registerWithInvite({ inviteCode, username, password, policyVersion }, meta) {
   if (!settingEnabled('registration_enabled')) throw fail(422, 'INVITE_INVALID', '当前未开放注册')
   const name = normalizeUsername(username)
@@ -387,6 +524,12 @@ function registerWithInvite({ inviteCode, username, password, policyVersion }, m
   return { token: createSession(userId, 'web'), user: publicUser(user), recovery_code: recovery }
 }
 
+/**
+ * recoverAccount —— 凭恢复码重置口令。
+ * 校验恢复码哈希与账号状态后更新口令，并作废旧有全部会话，
+ * 同时生成并返回一组新恢复码。
+ * @returns {{recovery_code:string}}
+ */
 function recoverAccount({ username, recoveryCode, password }, meta) {
   if (password.length < 8 || password.length > 128) throw fail(400, 'VALIDATION_ERROR', '密码长度需 8–128 位')
   const user = identityByUsername(username)
@@ -407,6 +550,12 @@ function recoverAccount({ username, recoveryCode, password }, meta) {
   return { recovery_code: recovery }
 }
 
+/**
+ * changePassword —— 修改当前用户口令。
+ * 校验原口令后写入新口令、生成新恢复码并撤销全部已有会话
+ * （前端随后需要重新登录）。
+ * @returns {{recovery_code:string}}
+ */
 function changePassword(userId, currentPassword, nextPassword, meta) {
   if (nextPassword.length < 8 || nextPassword.length > 128) throw fail(400, 'VALIDATION_ERROR', '密码长度需 8–128 位')
   const user = database.prepare(`
@@ -427,6 +576,11 @@ function changePassword(userId, currentPassword, nextPassword, meta) {
   return { recovery_code: recovery }
 }
 
+/**
+ * reauthenticate —— 敏感操作前的口令再验证。
+ * 校验通过后 touchReauth 标记，返回 5 分钟有效期时间戳。
+ * @returns {{valid_until:number}}
+ */
 function reauthenticate(userId, token, password) {
   const user = database.prepare(`
     SELECT password_hash FROM auth_identities WHERE user_id = ? AND provider = 'password'
@@ -438,12 +592,24 @@ function reauthenticate(userId, token, password) {
   return { valid_until: Date.now() + 5 * 60 * 1000 }
 }
 
+/**
+ * 取出归属当前用户的设备，找不到抛 404。用于所有设备操作的归属校验。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @returns {object}
+ */
 function ownedDevice(userId, deviceId) {
   const device = database.prepare('SELECT * FROM devices WHERE id = ? AND user_id = ?').get(deviceId, userId)
   if (!device) throw fail(404, 'NOT_FOUND', '设备不存在')
   return device
 }
 
+/**
+ * 把设备数据库行整理成对外响应：补中文分类、保修文案、维护计划数量。
+ * @param {object} row 设备行
+ * @param {string} [todayValue] 基准今天，测试可注入
+ * @returns {object}
+ */
 function presentDevice(row, todayValue = dates.today()) {
   const planCount = database.prepare('SELECT COUNT(*) AS n FROM maintenance_plans WHERE device_id = ?').get(row.id).n
   return {
@@ -463,6 +629,11 @@ function presentDevice(row, todayValue = dates.today()) {
   }
 }
 
+/**
+ * 列出某用户的全部设备（含今日日期与总数）。
+ * @param {string} userId
+ * @returns {{today:string, items:object[], total:number}}
+ */
 function listDevices(userId) {
   const todayValue = dates.today()
   const rows = database.prepare(`
@@ -471,6 +642,14 @@ function listDevices(userId) {
   return { today: todayValue, items: rows.map((row) => presentDevice(row, todayValue)), total: rows.length }
 }
 
+/**
+ * cleanDeviceInput —— 校验并清洗设备输入。
+ * 检查名称长度、分类、型号/备注长度、购买/保修日期及其先后关系；
+ * partial 用于部分更新场景（PATCH）。
+ * @param {object} input
+ * @param {{partial?:boolean}} [options]
+ * @returns {object} 规范化后的字段
+ */
 function cleanDeviceInput(input, { partial } = {}) {
   const todayValue = dates.today()
   const name = String(input.name || '').trim()
@@ -499,6 +678,13 @@ function cleanDeviceInput(input, { partial } = {}) {
   }
 }
 
+/**
+ * createDevice —— 新增设备。
+ * 先校验写入开关与每账号 100 台上限，再落库并返回完整设备。
+ * @param {string} userId
+ * @param {object} input
+ * @returns {object}
+ */
 function createDevice(userId, input) {
   assertWrites()
   const count = database.prepare('SELECT COUNT(*) AS n FROM devices WHERE user_id = ?').get(userId).n
@@ -514,6 +700,13 @@ function createDevice(userId, input) {
   return presentDevice(database.prepare('SELECT * FROM devices WHERE id = ?').get(id))
 }
 
+/**
+ * updateDevice —— 更新设备（带 version 乐观锁，冲突抛 409）。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @param {object} input
+ * @returns {object}
+ */
 function updateDevice(userId, deviceId, input) {
   assertWrites()
   const current = ownedDevice(userId, deviceId)
@@ -529,6 +722,12 @@ function updateDevice(userId, deviceId, input) {
   return presentDevice(database.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId))
 }
 
+/**
+ * deleteDevice —— 删除设备（校验写入开关、归属与 version）。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @param {number} version
+ */
 function deleteDevice(userId, deviceId, version) {
   assertWrites()
   const current = ownedDevice(userId, deviceId)
@@ -536,6 +735,12 @@ function deleteDevice(userId, deviceId, version) {
   database.prepare('DELETE FROM devices WHERE id = ? AND user_id = ? AND version = ?').run(deviceId, userId, current.version)
 }
 
+/**
+ * 把维护计划行整理成对外响应：补到期状态/文案，暂停计划单独标记。
+ * @param {object} row
+ * @param {string} [todayValue]
+ * @returns {object}
+ */
 function presentPlan(row, todayValue = dates.today()) {
   const due = dates.dueLabel(row.next_due_on, todayValue)
   return {
@@ -551,6 +756,12 @@ function presentPlan(row, todayValue = dates.today()) {
   }
 }
 
+/**
+ * 列出某设备下的全部维护计划（先校验设备归属）。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @returns {object[]}
+ */
 function listPlans(userId, deviceId) {
   ownedDevice(userId, deviceId)
   const todayValue = dates.today()
@@ -558,6 +769,12 @@ function listPlans(userId, deviceId) {
   return rows.map((row) => presentPlan(row, todayValue))
 }
 
+/**
+ * 取出归属当前用户的维护计划（连设备表带 user_id），找不到抛 404。
+ * @param {string} userId
+ * @param {string} planId
+ * @returns {object}
+ */
 function ownedPlan(userId, planId) {
   const plan = database.prepare(`
     SELECT p.*, d.user_id
@@ -569,6 +786,14 @@ function ownedPlan(userId, planId) {
   return plan
 }
 
+/**
+ * createPlan —— 新增维护计划。
+ * 校验写入开关、设备归属、每设备 5 个上限、标题/周期/到期日后落库。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @param {object} input
+ * @returns {object}
+ */
 function createPlan(userId, deviceId, input) {
   assertWrites()
   ownedDevice(userId, deviceId)
@@ -589,6 +814,13 @@ function createPlan(userId, deviceId, input) {
   return presentPlan(database.prepare('SELECT * FROM maintenance_plans WHERE id = ?').get(id))
 }
 
+/**
+ * updatePlan —— 更新维护计划（标题/周期/到期日/状态，带 version 乐观锁）。
+ * @param {string} userId
+ * @param {string} planId
+ * @param {object} input
+ * @returns {object}
+ */
 function updatePlan(userId, planId, input) {
   assertWrites()
   const current = ownedPlan(userId, planId)
@@ -611,6 +843,12 @@ function updatePlan(userId, planId, input) {
   return presentPlan(database.prepare('SELECT * FROM maintenance_plans WHERE id = ?').get(planId))
 }
 
+/**
+ * deletePlan —— 删除维护计划（校验写入开关、归属与 version）。
+ * @param {string} userId
+ * @param {string} planId
+ * @param {number} version
+ */
 function deletePlan(userId, planId, version) {
   assertWrites()
   const current = ownedPlan(userId, planId)
@@ -618,6 +856,14 @@ function deletePlan(userId, planId, version) {
   database.prepare('DELETE FROM maintenance_plans WHERE id = ? AND version = ?').run(planId, current.version)
 }
 
+/**
+ * 幂等辅助：同一 device_id + request_key 已存在时，
+ * 指纹相同则返回旧记录（安全重试），指纹不同抛 409（内容冲突）。
+ * @param {string} deviceId
+ * @param {string} requestKey
+ * @param {string} fingerprint
+ * @returns {object|null}
+ */
 function replayOrConflict(deviceId, requestKey, fingerprint) {
   const existing = database.prepare(`
     SELECT * FROM maintenance_logs WHERE device_id = ? AND request_key = ?
@@ -627,6 +873,12 @@ function replayOrConflict(deviceId, requestKey, fingerprint) {
   throw fail(409, 'DUPLICATE_REQUEST', '重复提交的内容不一致')
 }
 
+/**
+ * 把维护记录行整理成对外响应，并标记当前是否可撤销。
+ * @param {object} row
+ * @param {boolean} canVoid
+ * @returns {object}
+ */
 function presentLog(row, canVoid) {
   return {
     id: row.id,
@@ -642,6 +894,13 @@ function presentLog(row, canVoid) {
   }
 }
 
+/**
+ * 列出某设备全部维护记录，并计算每条是否允许撤销：
+ * 仅手动记录、或计划记录中“计划未再变更且该记录是最新一条”时可撤销。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @returns {object[]}
+ */
 function listLogs(userId, deviceId) {
   ownedDevice(userId, deviceId)
   const logs = database.prepare(`
@@ -666,6 +925,15 @@ function listLogs(userId, deviceId) {
   })
 }
 
+/**
+ * completePlan —— 登记一次计划维护。
+ * 校验完成日/备注/request_key、计划归属与 version，做幂等判断后，
+ * 在事务内把计划下次到期日顺延一个周期，并写入一条来源为 plan 的记录。
+ * @param {string} userId
+ * @param {string} planId
+ * @param {object} input
+ * @returns {{log:object, plan:object}}
+ */
 function completePlan(userId, planId, input) {
   assertWrites()
   const completedOn = String(input.completed_on || '').trim()
@@ -722,6 +990,14 @@ function completePlan(userId, planId, input) {
   }
 }
 
+/**
+ * createManualLog —— 手动登记一条维护记录（不改动计划）。
+ * 同样做写入开关、归属、字段与幂等校验。
+ * @param {string} userId
+ * @param {string} deviceId
+ * @param {object} input
+ * @returns {object}
+ */
 function createManualLog(userId, deviceId, input) {
   assertWrites()
   ownedDevice(userId, deviceId)
@@ -745,6 +1021,14 @@ function createManualLog(userId, deviceId, input) {
   return presentLog(database.prepare('SELECT * FROM maintenance_logs WHERE id = ?').get(id), true)
 }
 
+/**
+ * voidLog —— 撤销一条维护记录。
+ * 手动记录仅标记 voided_at；计划记录会把计划的下次到期日回滚为撤销前日期。
+ * 若计划之后又被完成/修改，则不允许撤销。
+ * @param {string} userId
+ * @param {string} logId
+ * @returns {{log:object, plan:object|null}}
+ */
 function voidLog(userId, logId) {
   assertWrites()
   const log = database.prepare(`
@@ -789,6 +1073,12 @@ function voidLog(userId, logId) {
   }
 }
 
+/**
+ * dueItems —— 汇总未来若干天内的保修截止与维护到期事项。
+ * @param {string} userId
+ * @param {number} days 窗口天数（1–90）
+ * @returns {{today:string, items:object[]}}
+ */
 function dueItems(userId, days) {
   const span = Number(days || 30)
   if (!Number.isInteger(span) || span < 1 || span > 90) throw fail(400, 'VALIDATION_ERROR', '天数需为 1–90')
@@ -832,6 +1122,13 @@ function dueItems(userId, days) {
   return { today: todayValue, items }
 }
 
+/**
+ * exportAccount —— 导出当前用户完整账户数据（设备含计划与记录）。
+ * 要求最近 5 分钟内重新验证过口令。
+ * @param {string} userId
+ * @param {string} token
+ * @returns {object}
+ */
 function exportAccount(userId, token) {
   assertReauth(token)
   const todayValue = dates.today()
@@ -849,6 +1146,12 @@ function exportAccount(userId, token) {
   }
 }
 
+/**
+ * calendarText —— 把未来事项生成符合 RFC5545 的 iCalendar（.ics）文本。
+ * @param {string} userId
+ * @param {number} days
+ * @returns {string}
+ */
 function calendarText(userId, days) {
   const payload = dueItems(userId, days)
   const upcoming = payload.items.filter((item) => item.due_on >= payload.today)
@@ -872,6 +1175,13 @@ function calendarText(userId, days) {
   return `${lines.join('\r\n')}\r\n`
 }
 
+/**
+ * deleteAccount —— 注销账户。
+ * 要求近期重新验证口令、再次输入用户名确认，随后删除用户并写审计。
+ * @param {string} userId
+ * @param {string} username
+ * @param {string} token
+ */
 function deleteAccount(userId, username, token) {
   assertReauth(token)
   const user = database.prepare('SELECT * FROM users WHERE id = ?').get(userId)
@@ -880,6 +1190,11 @@ function deleteAccount(userId, username, token) {
   writeAudit({ actorId: userId, action: 'account_delete', result: 'success', requestId: crypto.randomUUID() })
 }
 
+/**
+ * adminOverview —— 后台概览的聚合数据：
+ * 用户数、设备数、近 7 日新增、注册/写入开关、备份时间。
+ * @returns {object}
+ */
 function adminOverview() {
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
   return {
@@ -892,6 +1207,12 @@ function adminOverview() {
   }
 }
 
+/**
+ * listAdminUsers —— 后台查询普通用户（仅 role=user），
+ * 支持按用户名与状态过滤。
+ * @param {{q?:string, status?:string}}
+ * @returns {object[]}
+ */
 function listAdminUsers({ q, status }) {
   const query = String(q || '').trim().toLowerCase()
   const rows = database.prepare(`
@@ -908,6 +1229,11 @@ function listAdminUsers({ q, status }) {
   })
 }
 
+/**
+ * 按 id 取普通用户（含设备数量），不存在或非普通用户抛 404。
+ * @param {string} userId
+ * @returns {object}
+ */
 function adminUser(userId) {
   const row = database.prepare(`
     SELECT u.id, u.username, u.role, u.status, u.created_at, u.last_login_at, u.version,
@@ -918,6 +1244,16 @@ function adminUser(userId) {
   return row
 }
 
+/**
+ * setUserStatus —— 启用/停用普通用户（带 version 乐观锁）。
+ * 停用时撤销其全部会话并写审计。
+ * @param {string} actorId 操作者
+ * @param {string} userId 目标用户
+ * @param {string} status active / disabled
+ * @param {number} version
+ * @param {object} meta
+ * @returns {object}
+ */
 function setUserStatus(actorId, userId, status, version, meta) {
   if (!['active', 'disabled'].includes(status)) throw fail(400, 'VALIDATION_ERROR', '状态不正确')
   const user = adminUser(userId)
@@ -932,6 +1268,11 @@ function setUserStatus(actorId, userId, status, version, meta) {
   return adminUser(userId)
 }
 
+/**
+ * 按 id 取管理员账号（owner/operator），不存在抛 404。
+ * @param {string} userId
+ * @returns {object}
+ */
 function adminAccount(userId) {
   const row = database.prepare(`
     SELECT id, username, role, status, created_at, last_login_at, version
@@ -942,6 +1283,10 @@ function adminAccount(userId) {
   return row
 }
 
+/**
+ * listAdminAccounts —— 列出全部管理员账号，所有者排在前面。
+ * @returns {object[]}
+ */
 function listAdminAccounts() {
   return database.prepare(`
     SELECT id, username, role, status, created_at, last_login_at, version
@@ -951,6 +1296,11 @@ function listAdminAccounts() {
   `).all()
 }
 
+/**
+ * 统计除指定账号外、处于启用状态的所有者数量，用于“最后所有者”保护。
+ * @param {string} excludeId
+ * @returns {number}
+ */
 function countOtherActiveOwners(excludeId) {
   return database.prepare(`
     SELECT COUNT(*) AS n FROM users
@@ -958,6 +1308,13 @@ function countOtherActiveOwners(excludeId) {
   `).get(excludeId).n
 }
 
+/**
+ * 最后所有者保护：若目标是唯一启用中的所有者，
+ * 任何会让它降级/停用/删除的操作都抛 409（LAST_OWNER）。
+ * @param {object} account 目标账号
+ * @param {string|null} nextRole 变更后角色
+ * @param {string|null} nextStatus 变更后状态
+ */
 function assertActiveOwnerPreserved(account, nextRole, nextStatus) {
   if (account.role !== 'owner' || account.status !== 'active') return
   if (nextRole === 'owner' && nextStatus === 'active') return
@@ -966,18 +1323,34 @@ function assertActiveOwnerPreserved(account, nextRole, nextStatus) {
   }
 }
 
+/**
+ * 校验管理员角色只能是 owner / operator，否则抛 400。
+ * @param {string} role
+ */
 function assertValidAdminRole(role) {
   if (!['owner', 'operator'].includes(role)) {
     throw fail(400, 'VALIDATION_ERROR', '管理员角色只能是 owner 或 operator')
   }
 }
 
+/**
+ * 校验管理员口令长度为 8–128，否则抛 400。
+ * @param {string} password
+ */
 function assertAdminPassword(password) {
   if (password.length < 8 || password.length > 128) {
     throw fail(400, 'VALIDATION_ERROR', '密码长度需为 8–128 位')
   }
 }
 
+/**
+ * createAdminAccount —— 新增管理员账号（owner/operator）。
+ * 校验用户名、口令、角色后，在事务内创建 users + auth_identities，并写审计。
+ * @param {string} actorId
+ * @param {{username:string, password:string, role:string}} data
+ * @param {object} meta
+ * @returns {object}
+ */
 function createAdminAccount(actorId, { username, password, role }, meta) {
   const name = normalizeUsername(username)
   if (!/^[a-z0-9_]{4,32}$/.test(name)) throw fail(400, 'VALIDATION_ERROR', '用户名需为 4–32 位小写字母、数字或下划线')
@@ -1019,6 +1392,15 @@ function createAdminAccount(actorId, { username, password, role }, meta) {
   return adminAccount(userId)
 }
 
+/**
+ * updateAdminAccount —— 修改管理员的角色与状态（带 version 乐观锁）。
+ * 不允许对当前登录账号改角色或停用；同时受最后所有者保护。
+ * @param {string} actorId
+ * @param {string} userId
+ * @param {{role?:string, status?:string, version:number}} data
+ * @param {object} meta
+ * @returns {object}
+ */
 function updateAdminAccount(actorId, userId, { role, status, version }, meta) {
   const account = adminAccount(userId)
   if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
@@ -1054,6 +1436,17 @@ function updateAdminAccount(actorId, userId, { role, status, version }, meta) {
   return adminAccount(userId)
 }
 
+/**
+ * resetAdminPassword —— 重置管理员口令。
+ * 重置他人会撤销其全部会话；重置自己时保留当前会话（keepToken），其余设备退出。
+ * @param {string} actorId
+ * @param {string} userId
+ * @param {string} password
+ * @param {number} version
+ * @param {object} meta
+ * @param {string} [keepToken] 需保留的当前会话令牌
+ * @returns {object}
+ */
 function resetAdminPassword(actorId, userId, password, version, meta, keepToken = '') {
   const account = adminAccount(userId)
   if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
@@ -1093,6 +1486,14 @@ function resetAdminPassword(actorId, userId, password, version, meta, keepToken 
   return adminAccount(userId)
 }
 
+/**
+ * deleteAdminAccount —— 删除管理员账号。
+ * 不允许删除当前登录账号，并受最后所有者保护；删除后写审计。
+ * @param {string} actorId
+ * @param {string} userId
+ * @param {number} version
+ * @param {object} meta
+ */
 function deleteAdminAccount(actorId, userId, version, meta) {
   const account = adminAccount(userId)
   if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
@@ -1113,6 +1514,10 @@ function deleteAdminAccount(actorId, userId, version, meta) {
   })
 }
 
+/**
+ * listInvites —— 列出全部邀请码（按创建时间倒序）。
+ * @returns {object[]}
+ */
 function listInvites() {
   return database.prepare(`
     SELECT id, max_uses, used_count, expires_at, revoked_at, created_at
@@ -1120,6 +1525,15 @@ function listInvites() {
   `).all()
 }
 
+/**
+ * createInvite —— 创建邀请码。
+ * 校验可用次数（1–20）与到期日，生成去除易混淆字符的明文码，
+ * 库里只存哈希；明文仅本次返回。
+ * @param {string} actorId
+ * @param {{maxUses:number, expiresOn:string}} data
+ * @param {object} meta
+ * @returns {{id:string, code:string, max_uses:number, expires_at:number}}
+ */
 function createInvite(actorId, { maxUses, expiresOn }, meta) {
   const uses = Number(maxUses)
   if (!Number.isInteger(uses) || uses < 1 || uses > 20) throw fail(400, 'VALIDATION_ERROR', '可用次数需为 1–20')
@@ -1140,6 +1554,13 @@ function createInvite(actorId, { maxUses, expiresOn }, meta) {
   return { id, code, max_uses: uses, expires_at: expiresAt }
 }
 
+/**
+ * revokeInvite —— 撤销邀请（幂等，已撤销不重复处理）。
+ * @param {string} actorId
+ * @param {string} inviteId
+ * @param {object} meta
+ * @returns {object}
+ */
 function revokeInvite(actorId, inviteId, meta) {
   const invite = database.prepare('SELECT * FROM invite_codes WHERE id = ?').get(inviteId)
   if (!invite) throw fail(404, 'NOT_FOUND', '邀请不存在')
@@ -1150,6 +1571,10 @@ function revokeInvite(actorId, inviteId, meta) {
   return database.prepare('SELECT id, max_uses, used_count, expires_at, revoked_at, created_at FROM invite_codes WHERE id = ?').get(inviteId)
 }
 
+/**
+ * getSettings —— 读取全部运营配置，解析出 value 与版本。
+ * @returns {object[]}
+ */
 function getSettings() {
   return database.prepare('SELECT key, value_json, version, updated_at FROM app_settings ORDER BY key').all().map((row) => ({
     key: row.key,
@@ -1159,6 +1584,15 @@ function getSettings() {
   }))
 }
 
+/**
+ * setSetting —— 修改单个运营配置（仅布尔值，带 version 乐观锁），并写审计。
+ * @param {string} actorId
+ * @param {string} key
+ * @param {boolean} value
+ * @param {number} version
+ * @param {object} meta
+ * @returns {object}
+ */
 function setSetting(actorId, key, value, version, meta) {
   if (!['registration_enabled', 'writes_enabled'].includes(key)) throw fail(404, 'NOT_FOUND', '没有这项配置')
   if (typeof value !== 'boolean') throw fail(400, 'VALIDATION_ERROR', '配置值必须是布尔值')
@@ -1171,6 +1605,10 @@ function setSetting(actorId, key, value, version, meta) {
   return getSettings().find((item) => item.key === key)
 }
 
+/**
+ * listAudit —— 读取最近 50 条审计记录（带操作者用户名）。
+ * @returns {object[]}
+ */
 function listAudit() {
   return database.prepare(`
     SELECT a.created_at, a.action, a.result, a.target_type, a.target_id, u.username AS actor
