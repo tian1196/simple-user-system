@@ -66,6 +66,15 @@ npm 启动脚本自动读取 `.env`。DATABASE_PATH 指定库路径；HOST 默�
 
 `deploy/device-ledger.service` 提供 systemd 模板，沿用 /opt/device-ledger/data/ledger.sqlite 和独立 Node 24。部署前核对服务用户、目录与现有数据库，通过 `scripts/db-check.js` 检查连接和完整性。`deploy/install-node24.sh` 是可选的独立 Node 安装脚本。不要上传本地 node_modules、.env 或数据库覆盖服务器数据。
 
+### 一键部署到公网
+
+```bash
+sh scripts/deploy.sh                                   # HTTP 首次验证
+DEPLOY_DOMAIN=ledger.example.com sh scripts/deploy.sh --https   # HTTPS
+```
+
+脚本会安装 Node 24、安装依赖、构建前端、创建系统用户、启用 systemd 常驻与 Nginx，且不覆盖已有数据库。完整架构、HTTPS 证书、运维与排错见 [deploy/README.md](deploy/README.md)。
+
 写请求沿用完整业务版的来源校验。管理后台动态码目前仅检查六位数字，尚未实现真实 TOTP 校验。此次保留完整业务版的认证流程，没有切换为联调版的 scrypt 或 CSRF 令牌协议。
 
 ## 验证与提交

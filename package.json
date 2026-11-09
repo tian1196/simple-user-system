@@ -10,6 +10,8 @@
     "admin:dev": "npm --prefix web run dev",
     "admin:build": "npm --prefix web run build",
     "pack": "sh scripts/pack.sh",
+    "deploy": "sh scripts/deploy.sh",
+    "deploy:https": "sh scripts/deploy.sh --https",
     "upload": "sh scripts/upload.sh",
     "prepare": "husky",
     "commit": "cz",

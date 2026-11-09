@@ -1,18 +1,22 @@
 [Unit]
 Description=Device Ledger Node API
 After=network.target
+
 [Service]
 Type=simple
 User=deviceledger
 Group=deviceledger
 WorkingDirectory=/opt/device-ledger/app
 Environment=DATABASE_PATH=/opt/device-ledger/data/ledger.sqlite
+# 仅监听本机，由 Nginx 对外反代
 Environment=HOST=127.0.0.1
 Environment=PORT=3000
-Environment=APP_ORIGINS=http://127.0.0.1:3000,http://localhost:3000
+# 允许的来源。部署脚本会按你的域名/IP 自动改写；
+# 多个来源用逗号分隔，必须包含用户浏览器访问时的实际地址。
+Environment=APP_ORIGINS=http://CHANGE_ME
+# HTTP 阶段保持 false；启用 HTTPS 后改为 true
 Environment=COOKIE_SECURE=false
-# Internal SSH-tunnel testing only. Configure HTTPS+secure cookies for public use.
-ExecStart=/opt/node24/bin/node /opt/device-ledger/app/server/index.js
+ExecStart=/opt/node24/bin/node server/index.js
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -21,5 +25,6 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/device-ledger/data
+
 [Install]
 WantedBy=multi-user.target
