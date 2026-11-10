@@ -117,19 +117,24 @@ function demoView() {
   return `<div class="wrap"><div class="banner">静态示例 · 这些设备不会写入数据库。</div><div class="eyebrow">PRIVATE DEVICE LEDGER</div><h1>示例台账</h1><p class="muted">合成数据，仅供看清记录方式。</p><section class="card section"><h2>近期事项</h2><div class="list-item"><div><strong>空气净化器 · 滤芯更换</strong><p class="muted">2026-11-02</p></div><span class="tag alert">逾期 3 天</span></div><div class="list-item"><div><strong>工作笔记本 · 清洁检查</strong><p class="muted">2026-11-13</p></div><span class="tag">还有 8 天</span></div><div class="list-item"><div><strong>微单相机 · 保修截止</strong><p class="muted">2026-11-17</p></div><span class="tag">还有 12 天</span></div></section><div class="grid">${cards.map((card) => `<article class="card"><div class="device-icon">□</div><div class="row between"><h2>${card[0]}</h2><span class="tag">${card[1]}</span></div><p class="muted">${card[2]}</p><p>${card[3]}</p><p class="muted">${card[4]}</p></article>`).join('')}</div></div>`
 }
 
-function authView(kind) {
+async function authView(kind) {
   const titles = { login: '登录你的台账', register: '通过邀请开始使用', recover: '使用恢复码重置密码', admin: '管理员登录' }
   const invite = kind === 'register' ? field('邀请码', 'invite_code', 'text', 'required') : ''
   const recovery = kind === 'recover' ? field('一次性恢复码', 'recovery_code', 'text', 'required') : ''
   const passwordLabel = kind === 'recover' ? '新密码' : '密码'
   const passwordName = kind === 'recover' ? 'new_password' : 'password'
-  const totp = kind === 'admin' ? `${field('动态验证码', 'totp', 'text', 'required inputmode="numeric" maxlength="6" placeholder="Authenticator 6 位数字"')}<p class="muted">请使用 Google Authenticator / 微软 Authenticator 中的当前动态码。</p>` : ''
+  let captcha = ''
+  if (kind === 'admin') {
+    const challenge = await api('/admin/auth/captcha')
+    state.captchaId = challenge.captcha_id
+    captcha = `<div class="field"><label for="f-captcha_text">图形验证码</label><div class="row" style="gap:10px;align-items:center"><input id="f-captcha_text" name="captcha_text" required maxlength="6" autocomplete="off" placeholder="不区分大小写" style="flex:1"><img src="${esc(challenge.image)}" alt="验证码" width="132" height="44" style="border-radius:8px;background:#f4f7fb;cursor:pointer" data-action="refresh-captcha"></div><p class="muted">看不清可点击图片刷新。</p></div>`
+  }
   const policy = kind === 'register' ? `<label class="check"><input name="policy" type="checkbox" required><span>已阅读<a href="/privacy">隐私说明</a>，了解数据保存在本机数据库。</span></label>` : ''
   const submit = { login: '登录', register: '创建账户', recover: '重置密码', admin: '进入管理后台' }[kind]
   const links = kind === 'login'
     ? `<div class="row between"><a href="/register">有邀请码？注册</a><a href="/recover">忘记密码</a></div>`
     : '<a href="/login">返回用户登录</a>'
-  return `<div class="wrap"><div class="auth"><div class="eyebrow">${kind === 'admin' ? '运营入口' : '个人设备台账'}</div><h1>${titles[kind]}</h1><div class="card"><form data-form="${kind}">${invite}${field('用户名', 'username', 'text', 'required autocomplete="username"')}${recovery}${field(passwordLabel, passwordName, 'password', 'required minlength="8" autocomplete="current-password"')}${totp}${policy}<div class="error" id="form-error"></div><button class="primary wide" type="submit">${submit}</button></form><div class="rule"></div>${links}</div></div></div>`
+  return `<div class="wrap"><div class="auth"><div class="eyebrow">${kind === 'admin' ? '运营入口' : '个人设备台账'}</div><h1>${titles[kind]}</h1><div class="card"><form data-form="${kind}">${invite}${field('用户名', 'username', 'text', 'required autocomplete="username"')}${recovery}${field(passwordLabel, passwordName, 'password', 'required minlength="8" autocomplete="current-password"')}${captcha}${policy}<div class="error" id="form-error"></div><button class="primary wide" type="submit">${submit}</button></form><div class="rule"></div>${links}</div></div></div>`
 }
 
 function proseView(privacy) {
@@ -339,6 +344,14 @@ document.addEventListener('click', async (event) => {
   try {
     if (action === 'close') return closeDialog()
     if (action === 'retry') return render()
+    if (action === 'refresh-captcha') {
+      const challenge = await api('/admin/auth/captcha')
+      state.captchaId = challenge.captcha_id
+      button.setAttribute('src', challenge.image)
+      const input = document.querySelector('#f-captcha_text')
+      if (input) input.value = ''
+      return
+    }
     if (action === 'calendar') return downloadCalendar()
     if (action === 'edit-device') return box(deviceForm(state.device.device))
     if (action === 'add-plan') return planForm()
@@ -441,7 +454,10 @@ document.addEventListener('submit', async (event) => {
       return navigate('/app')
     }
     if (kind === 'admin') {
-      const data = await api('/admin/auth/login', { method: 'POST', body: values })
+      const data = await api('/admin/auth/login', {
+        method: 'POST',
+        body: { ...values, captcha_id: state.captchaId },
+      })
       state.admin = data.user
       return navigate('/admin')
     }

@@ -6,12 +6,18 @@ const path = require('node:path')
 const { spawn, spawnSync } = require('node:child_process')
 const { once } = require('node:events')
 const { openDatabase } = require('../server/database-tools')
-const totp = require('../server/totp')
 
 test('merged account, device, maintenance and deployment tools', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-merge-'))
   const filename = path.join(dir, 'test.sqlite')
-  const env = { ...process.env, DATABASE_PATH: filename, PORT: '31987', HOST: '127.0.0.1', APP_ORIGINS: 'http://127.0.0.1:31987' }
+  const env = {
+    ...process.env,
+    DATABASE_PATH: filename,
+    PORT: '31987',
+    HOST: '127.0.0.1',
+    APP_ORIGINS: 'http://127.0.0.1:31987',
+    CAPTCHA_DEBUG: '1',
+  }
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const run = (script, args = []) => spawnSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
   assert.equal(run('scripts/db-init.js').status, 0)
@@ -21,9 +27,8 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const invite = run('scripts/create-invite.js')
   assert.equal(invite.status, 0, invite.stderr)
   const code = invite.stdout.match(/：([^\n]+)/)[1]
-  const ownerSecret = totp.generateSecret()
   const store = openDatabase(filename)
-  store.connection.prepare("INSERT INTO users(id,username,role,mfa_secret_enc) VALUES('owner-id','owner','owner',?)").run(totp.encryptSecret(ownerSecret))
+  store.connection.prepare("INSERT INTO users(id,username,role) VALUES('owner-id','owner','owner')").run()
   store.connection.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_key,password_hash) VALUES('owner-auth','owner-id','password','owner',?)").run(require('bcryptjs').hashSync('owner-test-password', 10))
   store.connection.close()
   let child
@@ -44,6 +49,20 @@ test('merged account, device, maintenance and deployment tools', async t => {
     })
     return { response, body: response.status === 204 ? null : await response.json() }
   }
+  async function captchaLogin(username, password) {
+    const challenge = await request('/admin/auth/captcha')
+    assert.equal(challenge.response.status, 200, JSON.stringify(challenge.body))
+    assert.ok(challenge.body.data.captcha_id)
+    assert.ok(challenge.body.data.image)
+    assert.ok(challenge.body.data.captcha_text)
+    return request('/admin/auth/login', 'POST', {
+      username,
+      password,
+      captcha_id: challenge.body.data.captcha_id,
+      captcha_text: challenge.body.data.captcha_text,
+    })
+  }
+
   assert.equal((await request('/devices')).response.status, 401)
   assert.equal((await request('/health/ready')).body.database.connected, true)
   const registered = await request('/auth/register', 'POST', { username: 'merge_user', password: 'test-password-123', invite_code: code, policy_version: '2026-11-05' })
@@ -65,16 +84,15 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request('/devices')).body.data.total, 1)
   assert.equal((await request('/auth/logout', 'POST', {})).response.status, 204)
   assert.equal((await request('/devices')).response.status, 401)
+
   assert.equal((await request('/admin/auth/login', 'POST', {
     username: 'owner',
     password: 'owner-test-password',
-    totp: '000000',
-  })).response.status, 401)
-  const admin = await request('/admin/auth/login', 'POST', {
-    username: 'owner',
-    password: 'owner-test-password',
-    totp: totp.currentToken(ownerSecret),
-  })
+    captcha_id: 'missing',
+    captcha_text: 'ABCD',
+  })).response.status, 400)
+
+  const admin = await captchaLogin('owner', 'owner-test-password')
   assert.equal(admin.response.status, 200, JSON.stringify(admin.body))
   cookie = admin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/overview')).response.status, 200)
@@ -85,7 +103,6 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal(accountsBefore.body.data.items.length, 1)
   const ownerAccount = accountsBefore.body.data.items[0]
   assert.equal(ownerAccount.role, 'owner')
-  assert.equal(ownerAccount.mfa_bound, true)
 
   const createdOperator = await request('/admin/accounts', 'POST', {
     username: 'ops_user',
@@ -96,10 +113,6 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const operator = createdOperator.body.data
   assert.equal(operator.role, 'operator')
   assert.equal(operator.status, 'active')
-  assert.equal(operator.mfa_bound, true)
-  assert.ok(operator.mfa?.secret)
-  assert.ok(operator.mfa?.qrcode_data_url)
-  const operatorSecret = operator.mfa.secret
 
   assert.equal((await request('/admin/accounts', 'POST', {
     username: 'ops_user',
@@ -112,11 +125,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
     role: 'user',
   })).response.status, 400)
 
-  const operatorLogin = await request('/admin/auth/login', 'POST', {
-    username: 'ops_user',
-    password: 'ops-password-123',
-    totp: totp.currentToken(operatorSecret),
-  })
+  const operatorLogin = await captchaLogin('ops_user', 'ops-password-123')
   assert.equal(operatorLogin.response.status, 200, JSON.stringify(operatorLogin.body))
   cookie = operatorLogin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/accounts')).response.status, 403)
@@ -133,11 +142,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   })
   assert.equal(disabled.response.status, 200, JSON.stringify(disabled.body))
   assert.equal(disabled.body.data.status, 'disabled')
-  assert.equal((await request('/admin/auth/login', 'POST', {
-    username: 'ops_user',
-    password: 'ops-password-123',
-    totp: totp.currentToken(operatorSecret),
-  })).response.status, 403)
+  assert.equal((await captchaLogin('ops_user', 'ops-password-123')).response.status, 403)
 
   const enabled = await request(`/admin/accounts/${operator.id}`, 'PATCH', {
     status: 'active',
@@ -150,36 +155,10 @@ test('merged account, device, maintenance and deployment tools', async t => {
     version: enabled.body.data.version,
   })
   assert.equal(reset.response.status, 200, JSON.stringify(reset.body))
-  assert.equal((await request('/admin/auth/login', 'POST', {
-    username: 'ops_user',
-    password: 'ops-password-123',
-    totp: totp.currentToken(operatorSecret),
-  })).response.status, 401)
-  assert.equal((await request('/admin/auth/login', 'POST', {
-    username: 'ops_user',
-    password: 'ops-password-456',
-    totp: totp.currentToken(operatorSecret),
-  })).response.status, 200)
+  assert.equal((await captchaLogin('ops_user', 'ops-password-123')).response.status, 401)
+  assert.equal((await captchaLogin('ops_user', 'ops-password-456')).response.status, 200)
 
   cookie = ownerCookie
-  const mfaReset = await request(`/admin/accounts/${operator.id}/mfa/reset`, 'POST', {
-    version: reset.body.data.version,
-  })
-  assert.equal(mfaReset.response.status, 200, JSON.stringify(mfaReset.body))
-  assert.ok(mfaReset.body.data.mfa?.secret)
-  const rotatedSecret = mfaReset.body.data.mfa.secret
-  assert.equal((await request('/admin/auth/login', 'POST', {
-    username: 'ops_user',
-    password: 'ops-password-456',
-    totp: totp.currentToken(operatorSecret),
-  })).response.status, 401)
-  assert.equal((await request('/admin/auth/login', 'POST', {
-    username: 'ops_user',
-    password: 'ops-password-456',
-    totp: totp.currentToken(rotatedSecret),
-  })).response.status, 200)
-  cookie = ownerCookie
-
   assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'PATCH', {
     role: 'operator',
     version: ownerAccount.version,
@@ -203,7 +182,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   })).response.status, 204)
 
   assert.equal((await request(`/admin/accounts/${operator.id}`, 'DELETE', {
-    version: mfaReset.body.data.version,
+    version: reset.body.data.version,
   })).response.status, 204)
   const accountsAfter = await request('/admin/accounts')
   assert.equal(accountsAfter.body.data.items.length, 1)

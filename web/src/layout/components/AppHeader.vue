@@ -18,7 +18,7 @@ const currentTitle = computed(() => route.meta.title || '管理后台')
 
 async function handleLogout(): Promise<void> {
   try {
-    await ElMessageBox.confirm('退出后需要重新输入账号、密码和动态验证码。', '退出登录', {
+    await ElMessageBox.confirm('退出后需要重新输入账号、密码和图形验证码。', '退出登录', {
       confirmButtonText: '退出登录',
       cancelButtonText: '取消',
       type: 'warning',

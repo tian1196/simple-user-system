@@ -1,6 +1,5 @@
 import { request } from './request'
 import type {
-  AdminAccountCreated,
   AdminAccountItem,
   CreateAdminAccountPayload,
   ListResult,
@@ -14,10 +13,8 @@ export function getAdminAccounts(): Promise<ListResult<AdminAccountItem>> {
   })
 }
 
-export function createAdminAccount(
-  payload: CreateAdminAccountPayload,
-): Promise<AdminAccountCreated> {
-  return request<AdminAccountCreated>({
+export function createAdminAccount(payload: CreateAdminAccountPayload): Promise<AdminAccountItem> {
+  return request<AdminAccountItem>({
     url: '/admin/accounts',
     method: 'post',
     data: payload,
@@ -51,14 +48,6 @@ export function deleteAdminAccount(id: string, version: number): Promise<null> {
   return request<null>({
     url: `/admin/accounts/${encodeURIComponent(id)}`,
     method: 'delete',
-    data: { version },
-  })
-}
-
-export function resetAdminMfa(id: string, version: number): Promise<AdminAccountCreated> {
-  return request<AdminAccountCreated>({
-    url: `/admin/accounts/${encodeURIComponent(id)}/mfa/reset`,
-    method: 'post',
     data: { version },
   })
 }

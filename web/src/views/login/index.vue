@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Key, Lock, Notebook, Ticket, User, UserFilled } from '@element-plus/icons-vue'
+import { Key, Lock, Notebook, Refresh, Ticket, User, UserFilled } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
+import { getAdminCaptcha } from '@/api/auth'
 import { ApiError } from '@/api/request'
 import { useAuthStore } from '@/stores/auth'
 
@@ -17,8 +18,11 @@ const formRef = ref<FormInstance>()
 const form = reactive({
   username: '',
   password: '',
-  totp: '',
+  captcha_text: '',
 })
+const captchaId = ref('')
+const captchaImage = ref('')
+const captchaLoading = ref(false)
 const remember = ref(true)
 const errorMessage = ref('')
 const isDev = import.meta.env.DEV
@@ -26,10 +30,26 @@ const isDev = import.meta.env.DEV
 const rules: FormRules = {
   username: [{ required: true, message: '请输入管理账号', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  totp: [
-    { required: true, message: '请输入动态验证码', trigger: 'blur' },
-    { pattern: /^\d{6}$/, message: '动态验证码需为 6 位数字', trigger: 'blur' },
+  captcha_text: [
+    { required: true, message: '请输入图形验证码', trigger: 'blur' },
+    { min: 4, max: 6, message: '验证码一般为 4 位', trigger: 'blur' },
   ],
+}
+
+async function loadCaptcha(): Promise<void> {
+  captchaLoading.value = true
+  try {
+    const data = await getAdminCaptcha()
+    captchaId.value = data.captcha_id
+    captchaImage.value = data.image
+    form.captcha_text = ''
+  } catch (error) {
+    captchaImage.value = ''
+    captchaId.value = ''
+    errorMessage.value = error instanceof ApiError ? error.message : '验证码加载失败'
+  } finally {
+    captchaLoading.value = false
+  }
 }
 
 onMounted(() => {
@@ -38,18 +58,18 @@ onMounted(() => {
     form.username = remembered
     remember.value = true
   }
+  void loadCaptcha()
 })
 
-function sanitizeTotp(value: string): void {
-  form.totp = value.replace(/\D/g, '').slice(0, 6)
+function sanitizeCaptcha(value: string): void {
+  form.captcha_text = value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase()
 }
 
 function fillDemo(): void {
   form.username = 'owner'
   form.password = 'ledger-owner-2026'
-  form.totp = ''
   errorMessage.value = ''
-  ElMessage.info('请从 Authenticator 填入当前 6 位动态码')
+  ElMessage.info('请填写右侧图形验证码')
 }
 
 function resolveRedirect(value: unknown): string {
@@ -63,13 +83,18 @@ async function submit(): Promise<void> {
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
+  if (!captchaId.value) {
+    errorMessage.value = '验证码未加载，请点击刷新'
+    return
+  }
 
   errorMessage.value = ''
   try {
     await auth.login({
       username: form.username.trim(),
       password: form.password,
-      totp: form.totp,
+      captcha_id: captchaId.value,
+      captcha_text: form.captcha_text,
     })
 
     if (remember.value) {
@@ -82,6 +107,7 @@ async function submit(): Promise<void> {
     await router.replace(resolveRedirect(route.query.redirect))
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '登录失败，请稍后重试'
+    await loadCaptcha()
   }
 }
 </script>
@@ -147,7 +173,7 @@ async function submit(): Promise<void> {
         <div class="login-card__head">
           <p class="eyebrow">ADMIN LOGIN</p>
           <h2>登录管理后台</h2>
-          <p>输入管理账号与 Authenticator 中的 6 位动态验证码</p>
+          <p>输入管理账号、密码与图形验证码</p>
         </div>
 
         <el-form
@@ -179,21 +205,38 @@ async function submit(): Promise<void> {
             />
           </el-form-item>
 
-          <el-form-item label="动态验证码" prop="totp">
-            <el-input
-              v-model="form.totp"
-              :prefix-icon="Key"
-              placeholder="6 位数字"
-              inputmode="numeric"
-              autocomplete="one-time-code"
-              maxlength="6"
-              @input="sanitizeTotp"
-            />
+          <el-form-item label="图形验证码" prop="captcha_text">
+            <div class="captcha-row">
+              <el-input
+                v-model="form.captcha_text"
+                :prefix-icon="Key"
+                placeholder="不区分大小写"
+                autocomplete="off"
+                maxlength="6"
+                @input="sanitizeCaptcha"
+              />
+              <button
+                class="captcha-image"
+                type="button"
+                title="点击刷新验证码"
+                :disabled="captchaLoading"
+                @click="loadCaptcha"
+              >
+                <img v-if="captchaImage" :src="captchaImage" alt="图形验证码" />
+                <span v-else>{{ captchaLoading ? '加载中' : '点击获取' }}</span>
+              </button>
+              <el-button
+                class="captcha-refresh"
+                :icon="Refresh"
+                :loading="captchaLoading"
+                @click="loadCaptcha"
+              />
+            </div>
           </el-form-item>
 
           <div class="form-options">
             <el-checkbox v-model="remember">记住账号</el-checkbox>
-            <span class="form-options__tip">动态码每 30 秒刷新，请用 Authenticator 获取</span>
+            <span class="form-options__tip">看不清可点击图片刷新</span>
           </div>
 
           <el-alert
@@ -424,6 +467,49 @@ async function submit(): Promise<void> {
   .eyebrow {
     color: var(--app-primary);
   }
+}
+
+.captcha-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: center;
+}
+
+.captcha-image {
+  display: grid;
+  flex: 0 0 auto;
+  width: 132px;
+  height: 44px;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  background: #f4f7fb;
+  border: 1px solid var(--app-border, #d8e0ec);
+  border-radius: 10px;
+  place-items: center;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  span {
+    color: var(--app-muted);
+    font-size: 12px;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.7;
+  }
+}
+
+.captcha-refresh {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
 }
 
 .form-options {

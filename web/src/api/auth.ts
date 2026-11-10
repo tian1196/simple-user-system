@@ -1,5 +1,14 @@
 import { request } from './request'
-import type { AdminProfile, LoginPayload, LoginResult } from './types'
+import type { AdminProfile, CaptchaChallenge, LoginPayload, LoginResult } from './types'
+
+export function getAdminCaptcha(): Promise<CaptchaChallenge> {
+  return request<CaptchaChallenge>({
+    url: '/admin/auth/captcha',
+    method: 'get',
+    silent: true,
+    skipAuthHandler: true,
+  })
+}
 
 export function adminLogin(payload: LoginPayload): Promise<LoginResult> {
   return request<LoginResult>({

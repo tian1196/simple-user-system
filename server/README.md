@@ -224,11 +224,11 @@ cd web && npm install && npm run dev
 npm run admin:build
 ```
 
-本地空库首次启动时，终端会打印演示管理员 `owner / ledger-owner-2026` 以及 TOTP 密钥 / URI；请用 Authenticator 扫码后登录。
+本地空库首次启动时，终端会打印演示管理员 `owner / ledger-owner-2026`；管理后台登录需填写页面图形验证码。
 
 ## 九、已知边界与后续建议
 
-- 管理后台已接入 TOTP（`otpauth`）；存量账号可用 `scripts/provision-admin-mfa.js` 补绑；
+- 管理后台登录使用自研 SVG 图形验证码（`server/captcha.js`）；
 - `security.js` 的 scrypt/CSRF/限流尚未接入主链路，如启用需同步替换口令方案并补测试；
 - 当前结构固定为 schema 1，缺少自动升级迁移机制；新增字段时应补充正式迁移并更新版本；
 - 限流器为单进程内存实现，多实例部署需换成共享存储；

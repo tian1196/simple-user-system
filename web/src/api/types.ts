@@ -16,7 +16,13 @@ export interface AdminProfile {
 export interface LoginPayload {
   username: string
   password: string
-  totp: string
+  captcha_id: string
+  captcha_text: string
+}
+
+export interface CaptchaChallenge {
+  captcha_id: string
+  image: string
 }
 
 export interface LoginResult {
@@ -32,12 +38,6 @@ export interface Overview {
   backup_at: string | null
 }
 
-export interface AdminMfaProvisioning {
-  secret: string
-  otpauth_uri: string
-  qrcode_data_url: string
-}
-
 export interface AdminAccountItem {
   id: string
   username: string
@@ -46,11 +46,6 @@ export interface AdminAccountItem {
   created_at: number
   last_login_at: number | null
   version: number
-  mfa_bound: boolean
-}
-
-export interface AdminAccountCreated extends AdminAccountItem {
-  mfa: AdminMfaProvisioning
 }
 
 export interface CreateAdminAccountPayload {

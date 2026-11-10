@@ -14,6 +14,7 @@ const os = require('os')
 const path = require('path')
 const express = require('express')
 const db = require('./db')
+const captcha = require('./captcha')
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3000
@@ -182,14 +183,23 @@ api.post('/auth/login', handle((req, res) => {
   send(req, res, { user: result.user })
 }))
 
+api.get('/admin/auth/captcha', handle((req, res) => {
+  const item = captcha.createCaptcha()
+  const data = { captcha_id: item.id, image: item.image }
+  if (item.text) data.captcha_text = item.text
+  send(req, res, data)
+}))
+
 api.post('/admin/auth/login', handle((req, res) => {
-  const result = db.login(
-    req.body.username,
-    String(req.body.password || ''),
-    'admin',
-    meta(req),
-    String(req.body.totp || ''),
-  )
+  const captchaId = String(req.body.captcha_id || '')
+  const captchaText = String(req.body.captcha_text || '')
+  if (!captchaId || !captchaText.trim()) {
+    throw Object.assign(new Error('请填写图形验证码'), { status: 400, code: 'VALIDATION_ERROR' })
+  }
+  if (!captcha.consumeCaptcha(captchaId, captchaText)) {
+    throw Object.assign(new Error('图形验证码错误或已过期'), { status: 400, code: 'INVALID_CAPTCHA' })
+  }
+  const result = db.login(req.body.username, String(req.body.password || ''), 'admin', meta(req))
   setSessionCookie(res, 'ledger_admin', result.token, 8 * 3600)
   send(req, res, { user: result.user })
 }))
@@ -346,8 +356,8 @@ api.get('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
   send(req, res, { items: db.listAdminAccounts() })
 }))
 
-api.post('/admin/accounts', requireAdmin, requireOwner, handle(async (req, res) => {
-  send(req, res, await db.createAdminAccount(req.user.id, {
+api.post('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
+  send(req, res, db.createAdminAccount(req.user.id, {
     username: req.body.username,
     password: req.body.password,
     role: req.body.role,
@@ -370,15 +380,6 @@ api.put('/admin/accounts/:id/password', requireAdmin, requireOwner, handle((req,
     req.body.version,
     meta(req),
     req.sessionToken,
-  ))
-}))
-
-api.post('/admin/accounts/:id/mfa/reset', requireAdmin, requireOwner, handle(async (req, res) => {
-  send(req, res, await db.resetAdminMfa(
-    req.user.id,
-    req.params.id,
-    req.body.version,
-    meta(req),
   ))
 }))
 

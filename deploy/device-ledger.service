@@ -16,8 +16,6 @@ Environment=PORT=3000
 Environment=APP_ORIGINS=http://CHANGE_ME
 # HTTP 阶段保持 false；启用 HTTPS 后改为 true
 Environment=COOKIE_SECURE=false
-# 可选：加密管理员 TOTP 密钥；建议设成长随机串
-# Environment=MFA_KEY=replace-with-a-long-random-string
 ExecStart=/opt/node24/bin/node server/index.js
 Restart=on-failure
 RestartSec=5
