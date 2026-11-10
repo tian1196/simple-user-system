@@ -19,6 +19,7 @@ const bcrypt = require('bcryptjs')
 const { DatabaseSync } = require('node:sqlite')
 const { openDatabase, transaction } = require('./database-tools')
 const dates = require('./dates')
+const totp = require('./totp')
 
 /**
  * 默认使用本机 data/ledger.sqlite。
@@ -295,12 +296,13 @@ function seedLocalAccounts() {
   const passwordHash = bcrypt.hashSync(LOCAL_OWNER_PASSWORD, 10)
   const recovery = makeRecoveryCode()
   const inviteId = crypto.randomUUID()
+  const mfaSecret = totp.generateSecret()
 
   const tx = database.transaction(() => {
     database.prepare(`
-      INSERT INTO users (id, username, role, status, created_at, updated_at, version)
-      VALUES (?, ?, 'owner', 'active', ?, ?, 1)
-    `).run(ownerId, LOCAL_OWNER, now, now)
+      INSERT INTO users (id, username, role, status, mfa_secret_enc, created_at, updated_at, version)
+      VALUES (?, ?, 'owner', 'active', ?, ?, ?, 1)
+    `).run(ownerId, LOCAL_OWNER, totp.encryptSecret(mfaSecret), now, now)
     database.prepare(`
       INSERT INTO auth_identities (
         id, user_id, provider, provider_key, password_hash, recovery_code_hash, created_at, updated_at
@@ -315,6 +317,9 @@ function seedLocalAccounts() {
   messages.push(`本地所有者 ${LOCAL_OWNER} / ${LOCAL_OWNER_PASSWORD}`)
   messages.push(`本地邀请码 ${LOCAL_INVITE}`)
   messages.push(`所有者恢复码 ${recovery}`)
+  messages.push(`所有者 TOTP 密钥 ${mfaSecret}`)
+  messages.push(`用 Google Authenticator / 微软 Authenticator 扫 otpauth URI 或手动录入密钥`)
+  messages.push(`TOTP URI ${totp.buildUri(LOCAL_OWNER, mfaSecret)}`)
   return messages
 }
 
@@ -448,14 +453,16 @@ function assertReauth(token) {
  * login —— 统一登录（用户端 / 管理后台共用）。
  * 校验 bcrypt 口令、账号状态，并按 client_type 限制角色入口：
  * 用户端只允许普通用户，管理端只允许 owner/operator。
+ * 管理端额外校验 TOTP 动态验证码（otpauth / RFC 6238）。
  * 成功更新最近登录时间、写成功审计并下发新会话；失败写失败审计。
  * @param {string} username
  * @param {string} password
  * @param {'web'|'admin'} clientType
  * @param {{requestId:string, ip:string}} meta 请求元信息
+ * @param {string} [totpCode] 管理端 6 位动态码
  * @returns {{token:string, user:object}}
  */
-function login(username, password, clientType, meta) {
+function login(username, password, clientType, meta, totpCode = '') {
   const user = identityByUsername(username)
   const valid = user && bcrypt.compareSync(password, user.password_hash)
   if (!valid) {
@@ -468,6 +475,30 @@ function login(username, password, clientType, meta) {
   }
   if (clientType === 'admin' && user.role === 'user') {
     throw fail(401, 'INVALID_CREDENTIALS', '用户名或密码错误')
+  }
+  if (clientType === 'admin') {
+    if (!/^\d{6}$/.test(String(totpCode || ''))) {
+      throw fail(400, 'VALIDATION_ERROR', '动态验证码需为 6 位数字')
+    }
+    if (!user.mfa_secret_enc) {
+      throw fail(403, 'MFA_NOT_CONFIGURED', '该账号尚未绑定动态验证码，请联系所有者重置')
+    }
+    let secret
+    try {
+      secret = totp.decryptSecret(user.mfa_secret_enc)
+    } catch (error) {
+      throw fail(500, 'INTERNAL_ERROR', '动态验证码配置损坏，请联系所有者重置')
+    }
+    if (!totp.verifyToken(secret, totpCode)) {
+      writeAudit({
+        ...meta,
+        actorId: user.id,
+        action: 'login_failure',
+        result: 'failure',
+        detail: { client: clientType, reason: 'invalid_totp' },
+      })
+      throw fail(401, 'INVALID_TOTP', '动态验证码错误或已过期')
+    }
   }
   const now = Date.now()
   database.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(now, now, user.id)
@@ -1269,18 +1300,36 @@ function setUserStatus(actorId, userId, status, version, meta) {
 }
 
 /**
+ * 把管理员行转成对外结构（不暴露 MFA 密文，仅返回是否已绑定）。
+ * @param {object} row
+ * @returns {object}
+ */
+function presentAdminAccount(row) {
+  return {
+    id: row.id,
+    username: row.username,
+    role: row.role,
+    status: row.status,
+    created_at: row.created_at,
+    last_login_at: row.last_login_at,
+    version: row.version,
+    mfa_bound: Boolean(row.mfa_secret_enc),
+  }
+}
+
+/**
  * 按 id 取管理员账号（owner/operator），不存在抛 404。
  * @param {string} userId
  * @returns {object}
  */
 function adminAccount(userId) {
   const row = database.prepare(`
-    SELECT id, username, role, status, created_at, last_login_at, version
+    SELECT id, username, role, status, mfa_secret_enc, created_at, last_login_at, version
     FROM users
     WHERE id = ? AND role IN ('owner', 'operator')
   `).get(userId)
   if (!row) throw fail(404, 'NOT_FOUND', '管理员账号不存在')
-  return row
+  return presentAdminAccount(row)
 }
 
 /**
@@ -1289,11 +1338,11 @@ function adminAccount(userId) {
  */
 function listAdminAccounts() {
   return database.prepare(`
-    SELECT id, username, role, status, created_at, last_login_at, version
+    SELECT id, username, role, status, mfa_secret_enc, created_at, last_login_at, version
     FROM users
     WHERE role IN ('owner', 'operator')
     ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at ASC
-  `).all()
+  `).all().map(presentAdminAccount)
 }
 
 /**
@@ -1345,13 +1394,14 @@ function assertAdminPassword(password) {
 
 /**
  * createAdminAccount —— 新增管理员账号（owner/operator）。
- * 校验用户名、口令、角色后，在事务内创建 users + auth_identities，并写审计。
+ * 校验用户名、口令、角色后，在事务内创建 users + auth_identities + TOTP 密钥，并写审计。
+ * 返回账号信息与一次性 MFA 绑定材料（密钥 / URI / 二维码），明文密钥仅此次返回。
  * @param {string} actorId
  * @param {{username:string, password:string, role:string}} data
  * @param {object} meta
- * @returns {object}
+ * @returns {Promise<object>}
  */
-function createAdminAccount(actorId, { username, password, role }, meta) {
+async function createAdminAccount(actorId, { username, password, role }, meta) {
   const name = normalizeUsername(username)
   if (!/^[a-z0-9_]{4,32}$/.test(name)) throw fail(400, 'VALIDATION_ERROR', '用户名需为 4–32 位小写字母、数字或下划线')
   const passwordText = String(password || '')
@@ -1361,12 +1411,13 @@ function createAdminAccount(actorId, { username, password, role }, meta) {
 
   const now = Date.now()
   const userId = crypto.randomUUID()
+  const mfaSecret = totp.generateSecret()
   const tx = database.transaction(() => {
     try {
       database.prepare(`
-        INSERT INTO users (id, username, role, status, created_at, updated_at, version)
-        VALUES (?, ?, ?, 'active', ?, ?, 1)
-      `).run(userId, name, nextRole, now, now)
+        INSERT INTO users (id, username, role, status, mfa_secret_enc, created_at, updated_at, version)
+        VALUES (?, ?, ?, 'active', ?, ?, ?, 1)
+      `).run(userId, name, nextRole, totp.encryptSecret(mfaSecret), now, now)
     } catch (error) {
       if (/UNIQUE constraint failed: users.username/.test(error.message)) {
         throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
@@ -1389,7 +1440,46 @@ function createAdminAccount(actorId, { username, password, role }, meta) {
     result: 'success',
     detail: { role: nextRole },
   })
-  return adminAccount(userId)
+  return {
+    ...adminAccount(userId),
+    mfa: await totp.provisioningPayload(name, mfaSecret),
+  }
+}
+
+/**
+ * resetAdminMfa —— 重置管理员 TOTP 密钥。
+ * 生成新密钥并撤销该账号全部会话；明文密钥仅本次返回。
+ * @param {string} actorId
+ * @param {string} userId
+ * @param {number} version
+ * @param {object} meta
+ * @returns {Promise<object>}
+ */
+async function resetAdminMfa(actorId, userId, version, meta) {
+  const account = adminAccount(userId)
+  if (Number(version) !== account.version) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+
+  const mfaSecret = totp.generateSecret()
+  const now = Date.now()
+  const result = database.prepare(`
+    UPDATE users
+    SET mfa_secret_enc = ?, updated_at = ?, version = version + 1
+    WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+  `).run(totp.encryptSecret(mfaSecret), now, userId, account.version)
+  if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
+  database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'admin_mfa_reset',
+    targetType: 'admin',
+    targetId: userId,
+    result: 'success',
+  })
+  return {
+    ...adminAccount(userId),
+    mfa: await totp.provisioningPayload(account.username, mfaSecret),
+  }
 }
 
 /**
@@ -1662,6 +1752,7 @@ module.exports = {
   createAdminAccount,
   updateAdminAccount,
   resetAdminPassword,
+  resetAdminMfa,
   deleteAdminAccount,
   listInvites,
   createInvite,

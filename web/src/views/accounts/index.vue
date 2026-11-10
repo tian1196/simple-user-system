@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 
@@ -7,16 +8,23 @@ import {
   createAdminAccount,
   deleteAdminAccount,
   getAdminAccounts,
+  resetAdminMfa,
   resetAdminPassword,
   updateAdminAccount,
 } from '@/api/accounts'
 import { ApiError } from '@/api/request'
-import type { AdminAccountItem, AdminRole, UserStatus } from '@/api/types'
+import type {
+  AdminAccountItem,
+  AdminMfaProvisioning,
+  AdminRole,
+  UserStatus,
+} from '@/api/types'
 import PageHeader from '@/components/PageHeader.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { formatDateTime, initialOf, shortId } from '@/utils/format'
 
+const router = useRouter()
 const appStore = useAppStore()
 const auth = useAuthStore()
 
@@ -137,6 +145,35 @@ function openCreate(): void {
   void nextTick(() => createFormRef.value?.clearValidate())
 }
 
+const mfaVisible = ref(false)
+const mfaTitle = ref('绑定动态验证码')
+const mfaUsername = ref('')
+const mfaInfo = ref<AdminMfaProvisioning | null>(null)
+const pendingSelfMfaLogout = ref(false)
+
+function openMfaDialog(username: string, mfa: AdminMfaProvisioning, title: string): void {
+  mfaTitle.value = title
+  mfaUsername.value = username
+  mfaInfo.value = mfa
+  mfaVisible.value = true
+}
+
+async function onMfaClosed(): Promise<void> {
+  if (!pendingSelfMfaLogout.value) return
+  pendingSelfMfaLogout.value = false
+  await auth.logout()
+  await router.replace({ name: 'Login' })
+}
+
+async function copyText(value: string, label: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success(`${label}已复制`)
+  } catch {
+    ElMessage.error(`复制${label}失败，请手动选择文本`)
+  }
+}
+
 async function submitCreate(): Promise<void> {
   if (!createFormRef.value) return
   const valid = await createFormRef.value.validate().catch(() => false)
@@ -144,13 +181,14 @@ async function submitCreate(): Promise<void> {
 
   createLoading.value = true
   try {
-    await createAdminAccount({
+    const created = await createAdminAccount({
       username: createForm.username.trim(),
       password: createForm.password,
       role: createForm.role,
     })
     ElMessage.success('管理员账号已创建')
     createVisible.value = false
+    openMfaDialog(created.username, created.mfa, '绑定动态验证码')
     await load()
   } catch {
     // 全局错误提示已处理
@@ -291,6 +329,38 @@ async function submitReset(): Promise<void> {
     }
   } finally {
     resetLoading.value = false
+  }
+}
+
+// ---------- 重置动态验证码 ----------
+
+async function handleResetMfa(account: AdminAccountItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `将为「${account.username}」重新生成动态验证码密钥，旧 Authenticator 条目会立即，且该账号现有登录会话会立即失效。`,
+      '重置动态验证码',
+      {
+        type: 'warning',
+        confirmButtonText: '重置并展示新密钥',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  const resettingSelf = isSelf(account)
+  try {
+    const result = await resetAdminMfa(account.id, account.version)
+    openMfaDialog(result.username, result.mfa, '新的动态验证码')
+    if (resettingSelf) {
+      pendingSelfMfaLogout.value = true
+      ElMessage.warning('动态码已重置，请先保存新密钥，关闭后将重新登录')
+      return
+    }
+    await load()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) await load()
   }
 }
 
@@ -444,9 +514,22 @@ onMounted(load)
           <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
 
+        <el-table-column v-if="!appStore.isMobile" label="动态码" width="100">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.mfa_bound ? 'success' : 'warning'"
+              effect="light"
+              size="small"
+              round
+            >
+              {{ row.mfa_bound ? '已绑定' : '未绑定' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
         <el-table-column
           label="操作"
-          :width="appStore.isMobile ? 180 : 210"
+          :width="appStore.isMobile ? 220 : 280"
           :fixed="appStore.isMobile ? false : 'right'"
         >
           <template #default="{ row }">
@@ -460,6 +543,9 @@ onMounted(load)
             </el-button>
             <el-button link type="primary" @click="openReset(row as AdminAccountItem)">
               重置密码
+            </el-button>
+            <el-button link type="warning" @click="handleResetMfa(row as AdminAccountItem)">
+              重置动态码
             </el-button>
             <el-button
               link
@@ -534,8 +620,8 @@ onMounted(load)
         type="info"
         :closable="false"
         show-icon
-        title="创建后请通过安全渠道交付初始密码"
-        description="管理员登录仍需要 6 位动态验证码；当前版本后端只校验数字格式。"
+        title="创建后请通过安全渠道交付初始密码与动态码密钥"
+        description="创建成功后会展示一次性二维码，对方需用 Authenticator 扫码后才能登录。"
       />
 
       <template #footer>
@@ -543,6 +629,38 @@ onMounted(load)
         <el-button type="primary" :loading="createLoading" @click="submitCreate">
           创建管理员
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="mfaVisible"
+      :title="mfaTitle"
+      width="460px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      destroy-on-close
+      @closed="onMfaClosed"
+    >
+      <div v-if="mfaInfo" class="mfa-panel">
+        <p class="mfa-panel__lead">
+          请让账号 <strong>{{ mfaUsername }}</strong> 用 Google Authenticator、微软
+          Authenticator 或 1Password 扫描下方二维码；也可手动录入密钥。
+        </p>
+        <img class="mfa-panel__qr" :src="mfaInfo.qrcode_data_url" alt="TOTP 二维码" />
+        <div class="mfa-panel__secret">
+          <code>{{ mfaInfo.secret }}</code>
+          <el-button link type="primary" @click="copyText(mfaInfo.secret, '密钥')">复制密钥</el-button>
+        </div>
+        <el-alert
+          type="warning"
+          :closable="false"
+          show-icon
+          title="此密钥仅展示一次"
+          description="关闭后无法再次查看明文密钥；如遗失请使用「重置动态码」。"
+        />
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="mfaVisible = false">我已保存</el-button>
       </template>
     </el-dialog>
 
@@ -798,6 +916,47 @@ onMounted(load)
 
   span {
     font-size: 11.5px;
+  }
+}
+
+.mfa-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: center;
+  text-align: center;
+}
+
+.mfa-panel__lead {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.mfa-panel__qr {
+  width: 220px;
+  height: 220px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.mfa-panel__secret {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+
+  code {
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: #f4f7fb;
+    color: var(--app-text);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    word-break: break-all;
   }
 }
 

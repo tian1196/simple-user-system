@@ -19,17 +19,21 @@
     "db:init": "node --env-file-if-exists=.env scripts/db-init.js",
     "db:check": "node --env-file-if-exists=.env scripts/db-check.js",
     "invite:create": "node --env-file-if-exists=.env scripts/create-invite.js",
+    "mfa:provision": "node --env-file-if-exists=.env scripts/provision-admin-mfa.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "otpauth": "^9.6.0",
+    "qrcode": "^1.5.4",
     "uuid": "^11.0.5"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.1",
     "@commitlint/config-conventional": "^19.8.1",
+    "@types/qrcode": "^1.5.6",
     "commit-and-tag-version": "^12.6.0",
     "commitizen": "^4.3.1",
     "cz-conventional-changelog": "^3.3.0",

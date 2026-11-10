@@ -6,6 +6,7 @@ const path = require('node:path')
 const { spawn, spawnSync } = require('node:child_process')
 const { once } = require('node:events')
 const { openDatabase } = require('../server/database-tools')
+const totp = require('../server/totp')
 
 test('merged account, device, maintenance and deployment tools', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-merge-'))
@@ -20,8 +21,9 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const invite = run('scripts/create-invite.js')
   assert.equal(invite.status, 0, invite.stderr)
   const code = invite.stdout.match(/：([^\n]+)/)[1]
+  const ownerSecret = totp.generateSecret()
   const store = openDatabase(filename)
-  store.connection.prepare("INSERT INTO users(id,username,role) VALUES('owner-id','owner','owner')").run()
+  store.connection.prepare("INSERT INTO users(id,username,role,mfa_secret_enc) VALUES('owner-id','owner','owner',?)").run(totp.encryptSecret(ownerSecret))
   store.connection.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_key,password_hash) VALUES('owner-auth','owner-id','password','owner',?)").run(require('bcryptjs').hashSync('owner-test-password', 10))
   store.connection.close()
   let child
@@ -63,7 +65,16 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request('/devices')).body.data.total, 1)
   assert.equal((await request('/auth/logout', 'POST', {})).response.status, 204)
   assert.equal((await request('/devices')).response.status, 401)
-  const admin = await request('/admin/auth/login', 'POST', { username: 'owner', password: 'owner-test-password', totp: '123456' })
+  assert.equal((await request('/admin/auth/login', 'POST', {
+    username: 'owner',
+    password: 'owner-test-password',
+    totp: '000000',
+  })).response.status, 401)
+  const admin = await request('/admin/auth/login', 'POST', {
+    username: 'owner',
+    password: 'owner-test-password',
+    totp: totp.currentToken(ownerSecret),
+  })
   assert.equal(admin.response.status, 200, JSON.stringify(admin.body))
   cookie = admin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/overview')).response.status, 200)
@@ -74,6 +85,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal(accountsBefore.body.data.items.length, 1)
   const ownerAccount = accountsBefore.body.data.items[0]
   assert.equal(ownerAccount.role, 'owner')
+  assert.equal(ownerAccount.mfa_bound, true)
 
   const createdOperator = await request('/admin/accounts', 'POST', {
     username: 'ops_user',
@@ -84,6 +96,10 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const operator = createdOperator.body.data
   assert.equal(operator.role, 'operator')
   assert.equal(operator.status, 'active')
+  assert.equal(operator.mfa_bound, true)
+  assert.ok(operator.mfa?.secret)
+  assert.ok(operator.mfa?.qrcode_data_url)
+  const operatorSecret = operator.mfa.secret
 
   assert.equal((await request('/admin/accounts', 'POST', {
     username: 'ops_user',
@@ -99,7 +115,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const operatorLogin = await request('/admin/auth/login', 'POST', {
     username: 'ops_user',
     password: 'ops-password-123',
-    totp: '123456',
+    totp: totp.currentToken(operatorSecret),
   })
   assert.equal(operatorLogin.response.status, 200, JSON.stringify(operatorLogin.body))
   cookie = operatorLogin.response.headers.get('set-cookie').split(';')[0]
@@ -120,7 +136,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request('/admin/auth/login', 'POST', {
     username: 'ops_user',
     password: 'ops-password-123',
-    totp: '123456',
+    totp: totp.currentToken(operatorSecret),
   })).response.status, 403)
 
   const enabled = await request(`/admin/accounts/${operator.id}`, 'PATCH', {
@@ -137,13 +153,32 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request('/admin/auth/login', 'POST', {
     username: 'ops_user',
     password: 'ops-password-123',
-    totp: '123456',
+    totp: totp.currentToken(operatorSecret),
   })).response.status, 401)
   assert.equal((await request('/admin/auth/login', 'POST', {
     username: 'ops_user',
     password: 'ops-password-456',
-    totp: '123456',
+    totp: totp.currentToken(operatorSecret),
   })).response.status, 200)
+
+  cookie = ownerCookie
+  const mfaReset = await request(`/admin/accounts/${operator.id}/mfa/reset`, 'POST', {
+    version: reset.body.data.version,
+  })
+  assert.equal(mfaReset.response.status, 200, JSON.stringify(mfaReset.body))
+  assert.ok(mfaReset.body.data.mfa?.secret)
+  const rotatedSecret = mfaReset.body.data.mfa.secret
+  assert.equal((await request('/admin/auth/login', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-456',
+    totp: totp.currentToken(operatorSecret),
+  })).response.status, 401)
+  assert.equal((await request('/admin/auth/login', 'POST', {
+    username: 'ops_user',
+    password: 'ops-password-456',
+    totp: totp.currentToken(rotatedSecret),
+  })).response.status, 200)
+  cookie = ownerCookie
 
   assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'PATCH', {
     role: 'operator',
@@ -168,7 +203,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   })).response.status, 204)
 
   assert.equal((await request(`/admin/accounts/${operator.id}`, 'DELETE', {
-    version: reset.body.data.version,
+    version: mfaReset.body.data.version,
   })).response.status, 204)
   const accountsAfter = await request('/admin/accounts')
   assert.equal(accountsAfter.body.data.items.length, 1)

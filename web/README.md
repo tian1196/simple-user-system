@@ -24,7 +24,7 @@ npm run dev
 ```text
 账号：owner
 密码：ledger-owner-2026
-动态码：任意 6 位数字（当前后端只校验格式）
+动态码：Authenticator 中的 6 位 TOTP（后端真实校验）
 ```
 
 登录页只在开发模式下显示这组提示，生产构建不会出现。
@@ -182,6 +182,6 @@ location /api/ {
 
 ## 注意
 
-- 当前后端的管理员动态码只检查 6 位数字，尚未接入真实 TOTP；接入时把登录页说明文案一并更新。
+- 管理员动态码已接入真实 TOTP；新增/重置账号时会展示一次性二维码与密钥。
 - 后台按产品约束只展示账号元数据与设备数量，不提供查看用户设备名称、备注、维护记录的入口。
 - `src/types/auto-imports.d.ts` 与 `src/types/components.d.ts` 由 Vite 插件生成，建议随代码提交，保证全新克隆后 `npm run type-check` 可直接运行。

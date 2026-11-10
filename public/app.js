@@ -123,7 +123,7 @@ function authView(kind) {
   const recovery = kind === 'recover' ? field('一次性恢复码', 'recovery_code', 'text', 'required') : ''
   const passwordLabel = kind === 'recover' ? '新密码' : '密码'
   const passwordName = kind === 'recover' ? 'new_password' : 'password'
-  const totp = kind === 'admin' ? `${field('动态验证码', 'totp', 'text', 'required inputmode="numeric" maxlength="6" placeholder="6 位数字"')}<p class="muted">动态码校验尚未接入，当前只检查是否为 6 位数字。</p>` : ''
+  const totp = kind === 'admin' ? `${field('动态验证码', 'totp', 'text', 'required inputmode="numeric" maxlength="6" placeholder="Authenticator 6 位数字"')}<p class="muted">请使用 Google Authenticator / 微软 Authenticator 中的当前动态码。</p>` : ''
   const policy = kind === 'register' ? `<label class="check"><input name="policy" type="checkbox" required><span>已阅读<a href="/privacy">隐私说明</a>，了解数据保存在本机数据库。</span></label>` : ''
   const submit = { login: '登录', register: '创建账户', recover: '重置密码', admin: '进入管理后台' }[kind]
   const links = kind === 'login'

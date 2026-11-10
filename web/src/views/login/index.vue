@@ -47,8 +47,9 @@ function sanitizeTotp(value: string): void {
 function fillDemo(): void {
   form.username = 'owner'
   form.password = 'ledger-owner-2026'
-  form.totp = '123456'
+  form.totp = ''
   errorMessage.value = ''
+  ElMessage.info('请从 Authenticator 填入当前 6 位动态码')
 }
 
 function resolveRedirect(value: unknown): string {
@@ -146,7 +147,7 @@ async function submit(): Promise<void> {
         <div class="login-card__head">
           <p class="eyebrow">ADMIN LOGIN</p>
           <h2>登录管理后台</h2>
-          <p>输入管理账号与 6 位动态验证码</p>
+          <p>输入管理账号与 Authenticator 中的 6 位动态验证码</p>
         </div>
 
         <el-form
@@ -192,7 +193,7 @@ async function submit(): Promise<void> {
 
           <div class="form-options">
             <el-checkbox v-model="remember">记住账号</el-checkbox>
-            <span class="form-options__tip">动态码当前仅校验 6 位数字</span>
+            <span class="form-options__tip">动态码每 30 秒刷新，请用 Authenticator 获取</span>
           </div>
 
           <el-alert

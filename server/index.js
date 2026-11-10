@@ -87,21 +87,21 @@ function fail(req, res, status, code, message) {
 }
 
 /**
- * handle —— 同步路由处理器的统一异常捕获包装。
+ * handle —— 路由处理器统一异常捕获（支持同步与 async）。
  * 把业务函数抛出的带 status 错误转成统一错误响应；
  * 5xx 视为服务端问题，打印日志并对外隐藏具体细节。
- * @param {(req:import('express').Request,res:import('express').Response)=>void} fn
+ * @param {(req:import('express').Request,res:import('express').Response)=>unknown} fn
  * @returns {import('express').RequestHandler}
  */
 function handle(fn) {
   return (req, res) => {
-    try {
-      fn(req, res)
-    } catch (error) {
-      const status = error.status || 500
-      if (status >= 500) console.error(error)
-      fail(req, res, status, error.code || 'INTERNAL_ERROR', status >= 500 ? '服务器错误' : error.message)
-    }
+    Promise.resolve()
+      .then(() => fn(req, res))
+      .catch((error) => {
+        const status = error.status || 500
+        if (status >= 500) console.error(error)
+        fail(req, res, status, error.code || 'INTERNAL_ERROR', status >= 500 ? '服务器错误' : error.message)
+      })
   }
 }
 
@@ -183,9 +183,13 @@ api.post('/auth/login', handle((req, res) => {
 }))
 
 api.post('/admin/auth/login', handle((req, res) => {
-  const totp = String(req.body.totp || '')
-  if (!/^\d{6}$/.test(totp)) throw Object.assign(new Error('动态验证码需为 6 位数字'), { status: 400, code: 'VALIDATION_ERROR' })
-  const result = db.login(req.body.username, String(req.body.password || ''), 'admin', meta(req))
+  const result = db.login(
+    req.body.username,
+    String(req.body.password || ''),
+    'admin',
+    meta(req),
+    String(req.body.totp || ''),
+  )
   setSessionCookie(res, 'ledger_admin', result.token, 8 * 3600)
   send(req, res, { user: result.user })
 }))
@@ -342,8 +346,8 @@ api.get('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
   send(req, res, { items: db.listAdminAccounts() })
 }))
 
-api.post('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
-  send(req, res, db.createAdminAccount(req.user.id, {
+api.post('/admin/accounts', requireAdmin, requireOwner, handle(async (req, res) => {
+  send(req, res, await db.createAdminAccount(req.user.id, {
     username: req.body.username,
     password: req.body.password,
     role: req.body.role,
@@ -366,6 +370,15 @@ api.put('/admin/accounts/:id/password', requireAdmin, requireOwner, handle((req,
     req.body.version,
     meta(req),
     req.sessionToken,
+  ))
+}))
+
+api.post('/admin/accounts/:id/mfa/reset', requireAdmin, requireOwner, handle(async (req, res) => {
+  send(req, res, await db.resetAdminMfa(
+    req.user.id,
+    req.params.id,
+    req.body.version,
+    meta(req),
   ))
 }))
 

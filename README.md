@@ -35,7 +35,7 @@ npm run dev
 # http://127.0.0.1:5173/admin/
 ```
 
-开发服务器会把 `/api` 代理到 `http://127.0.0.1:3000`，所以先保持后端运行。空库首次启动时终端会打印本地管理员 `owner / ledger-owner-2026`；动态码当前只需 6 位数字。根目录也可以直接执行 `npm run admin:dev`。
+开发服务器会把 `/api` 代理到 `http://127.0.0.1:3000`，所以先保持后端运行。空库首次启动时终端会打印本地管理员 `owner / ledger-owner-2026` 以及 TOTP 密钥 / URI，请用 Authenticator 扫码后登录。根目录也可以直接执行 `npm run admin:dev`。
 
 构建并让 Express 在 `/admin` 直接托管：
 
@@ -75,7 +75,7 @@ DEPLOY_DOMAIN=ledger.example.com sh scripts/deploy.sh --https   # HTTPS
 
 脚本会安装 Node 24、安装依赖、构建前端、创建系统用户、启用 systemd 常驻与 Nginx，且不覆盖已有数据库。完整架构、HTTPS 证书、运维与排错见 [deploy/README.md](deploy/README.md)。
 
-写请求沿用完整业务版的来源校验。管理后台动态码目前仅检查六位数字，尚未实现真实 TOTP 校验。此次保留完整业务版的认证流程，没有切换为联调版的 scrypt 或 CSRF 令牌协议。
+写请求沿用完整业务版的来源校验。管理后台动态码已接入真实 TOTP（`otpauth`，兼容 Google / 微软 Authenticator）。创建或重置管理员时会一次性展示二维码与密钥；线上存量账号可用 `npm run mfa:provision -- owner --force` 补绑。
 
 ## 验证与提交
 
@@ -94,6 +94,6 @@ npm run release
 - 开发地址：`http://127.0.0.1:5173/admin/`；生产构建后：`http://127.0.0.1:3000/admin/`。
 - 页面：登录、运营概览、账号管理、邀请管理、系统账号（仅所有者）、运营配置（仅所有者）、操作审计（仅所有者）。
 - 登录态：后端 HttpOnly Cookie，401 自动清理并回跳登录页；账号状态、系统账号与配置修改使用版本号处理并发冲突。
-- 动态码：当前后端只校验 6 位数字，尚未接入真实 TOTP，登录页与文档均已标注。
+- 动态码：管理后台已接入 TOTP；用户端登录不需要动态码。
 
 启动、构建、目录结构与部署细节见 [web/README.md](web/README.md)。
