@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import {
   Avatar,
   Document,
+  Key,
   Notebook,
   Odometer,
   Setting,
@@ -12,7 +13,7 @@ import {
   User,
 } from '@element-plus/icons-vue'
 
-import type { AdminRole } from '@/api/types'
+import type { PermissionKey } from '@/constants/access'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 
@@ -20,16 +21,17 @@ interface MenuEntry {
   path: string
   title: string
   icon: Component
-  roles: AdminRole[]
+  permission: PermissionKey
 }
 
 const menu: MenuEntry[] = [
-  { path: '/dashboard', title: '运营概览', icon: Odometer, roles: ['owner', 'operator'] },
-  { path: '/users', title: '账号管理', icon: User, roles: ['owner', 'operator'] },
-  { path: '/invites', title: '邀请管理', icon: Ticket, roles: ['owner', 'operator'] },
-  { path: '/accounts', title: '系统账号', icon: Avatar, roles: ['owner'] },
-  { path: '/settings', title: '运营配置', icon: Setting, roles: ['owner'] },
-  { path: '/audit', title: '操作审计', icon: Document, roles: ['owner'] },
+  { path: '/dashboard', title: '运营概览', icon: Odometer, permission: 'overview.read' },
+  { path: '/users', title: '账号管理', icon: User, permission: 'users.read' },
+  { path: '/invites', title: '邀请管理', icon: Ticket, permission: 'invites.manage' },
+  { path: '/accounts', title: '系统账号', icon: Avatar, permission: 'accounts.manage' },
+  { path: '/permissions', title: '权限管理', icon: Key, permission: 'permissions.read' },
+  { path: '/settings', title: '运营配置', icon: Setting, permission: 'settings.manage' },
+  { path: '/audit', title: '操作审计', icon: Document, permission: 'audit.read' },
 ]
 
 const route = useRoute()
@@ -37,17 +39,14 @@ const auth = useAuthStore()
 const appStore = useAppStore()
 
 const collapsed = computed(() => appStore.sidebarCollapsed && !appStore.isMobile)
-const visibleMenu = computed(() => {
-  const role = auth.user?.role
-  if (!role) return []
-  return menu.filter((item) => item.roles.includes(role))
-})
+const visibleMenu = computed(() => menu.filter((item) => auth.can(item.permission)))
 
 // 子页面（如后续扩展详情页）仍保持父级菜单高亮
 const activeMenu = computed(() => {
   const path = route.path
   if (path.startsWith('/users')) return '/users'
   if (path.startsWith('/invites')) return '/invites'
+  if (path.startsWith('/permissions')) return '/permissions'
   return path
 })
 

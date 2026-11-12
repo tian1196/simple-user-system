@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { RefreshLeft, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { getUsers, updateUserStatus } from '@/api/users'
+import { getUsers, resetUserPassword, updateUserStatus } from '@/api/users'
 import { ApiError } from '@/api/request'
 import type { AdminUserItem, UserStatus, UserStatusFilter } from '@/api/types'
 import PageHeader from '@/components/PageHeader.vue'
 import { useAppStore } from '@/stores/app'
+import { copyText } from '@/utils/clipboard'
 import { formatDateTime, initialOf, shortId } from '@/utils/format'
 import UserDetailDrawer from './components/UserDetailDrawer.vue'
 
@@ -95,6 +96,48 @@ async function toggleStatus(user: AdminUserItem): Promise<void> {
     if (index >= 0) users.value[index] = updated
     if (detailVisible.value && selectedUserId.value === updated.id) detailVisible.value = false
     ElMessage.success(`已${actionText}账号`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) await load()
+  }
+}
+
+async function resetPassword(user: AdminUserItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `将为「${user.username}」生成一组新密码，并立即退出该账号的全部登录。旧的恢复码也会失效。`,
+      '重置密码',
+      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  try {
+    const result = await resetUserPassword(user.id, user.version)
+    const index = users.value.findIndex((item) => item.id === result.user.id)
+    if (index >= 0) users.value[index] = result.user
+    if (detailVisible.value && selectedUserId.value === result.user.id) detailVisible.value = false
+    try {
+      await ElMessageBox.alert(
+        h('div', [
+          h('p', { style: 'margin:0;line-height:1.6' }, '新密码只显示这一次，请复制后交给用户。'),
+          h(
+            'code',
+            {
+              style:
+                'display:block;margin-top:10px;padding:10px 12px;font-size:16px;letter-spacing:0.04em;background:#f4f6fa;border-radius:8px;',
+            },
+            result.password,
+          ),
+        ]),
+        '密码已重置',
+        { confirmButtonText: '复制密码' },
+      )
+      const copied = await copyText(result.password)
+      ElMessage.success(copied ? '密码已复制' : '请手动复制弹窗里的密码')
+    } catch {
+      // 关掉弹窗时密码不再展示
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) await load()
   }
@@ -198,13 +241,16 @@ onMounted(async () => {
 
         <el-table-column
           label="操作"
-          :width="appStore.isMobile ? 112 : 150"
+          :width="appStore.isMobile ? 168 : 220"
           :fixed="appStore.isMobile ? false : 'right'"
         >
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row as AdminUserItem)"
               >详情</el-button
             >
+            <el-button link type="warning" @click="resetPassword(row as AdminUserItem)">
+              重置密码
+            </el-button>
             <el-button
               link
               :type="row.status === 'active' ? 'danger' : 'success'"

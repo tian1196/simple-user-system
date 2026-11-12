@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import {
   ArrowRight,
   Document,
+  Key,
   Monitor,
   Refresh,
   Setting,
@@ -178,7 +179,12 @@ onMounted(load)
           </div>
 
           <div class="quick-list">
-            <button type="button" class="quick-item" @click="router.push('/invites')">
+            <button
+              v-if="auth.can('invites.manage')"
+              type="button"
+              class="quick-item"
+              @click="router.push('/invites')"
+            >
               <span class="quick-item__icon is-blue"
                 ><el-icon><Ticket /></el-icon
               ></span>
@@ -189,7 +195,12 @@ onMounted(load)
               <el-icon class="quick-item__arrow"><ArrowRight /></el-icon>
             </button>
 
-            <button type="button" class="quick-item" @click="router.push('/users')">
+            <button
+              v-if="auth.can('users.read')"
+              type="button"
+              class="quick-item"
+              @click="router.push('/users')"
+            >
               <span class="quick-item__icon is-green"
                 ><el-icon><User /></el-icon
               ></span>
@@ -200,7 +211,23 @@ onMounted(load)
               <el-icon class="quick-item__arrow"><ArrowRight /></el-icon>
             </button>
 
-            <template v-if="auth.isOwner">
+            <button
+              v-if="auth.can('permissions.read')"
+              type="button"
+              class="quick-item"
+              @click="router.push('/permissions')"
+            >
+              <span class="quick-item__icon is-amber"
+                ><el-icon><Key /></el-icon
+              ></span>
+              <span class="quick-item__text">
+                <strong>权限管理</strong>
+                <small>查看角色，以及各角色能做什么</small>
+              </span>
+              <el-icon class="quick-item__arrow"><ArrowRight /></el-icon>
+            </button>
+
+            <template v-if="auth.can('settings.manage')">
               <button type="button" class="quick-item" @click="router.push('/settings')">
                 <span class="quick-item__icon is-amber"
                   ><el-icon><Setting /></el-icon
@@ -212,6 +239,9 @@ onMounted(load)
                 <el-icon class="quick-item__arrow"><ArrowRight /></el-icon>
               </button>
 
+            </template>
+
+            <template v-if="auth.can('audit.read')">
               <button type="button" class="quick-item" @click="router.push('/audit')">
                 <span class="quick-item__icon is-violet"
                   ><el-icon><Document /></el-icon

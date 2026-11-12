@@ -28,7 +28,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal(invite.status, 0, invite.stderr)
   const code = invite.stdout.match(/：([^\n]+)/)[1]
   const store = openDatabase(filename)
-  store.connection.prepare("INSERT INTO users(id,username,role) VALUES('owner-id','owner','owner')").run()
+  store.connection.prepare("INSERT INTO users(id,username,role) VALUES('owner-id','owner','admin')").run()
   store.connection.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_key,password_hash) VALUES('owner-auth','owner-id','password','owner',?)").run(require('bcryptjs').hashSync('owner-test-password', 10))
   store.connection.close()
   let child
@@ -80,7 +80,9 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request(`/devices/${device.id}`)).body.data.plans.length, 1)
   assert.equal((await request(`/devices/${device.id}`, 'PATCH', { name: '更新', version: 99 })).response.status, 409)
   await stop(); await start()
-  assert.equal((await request('/auth/me')).body.data.username, 'merge_user')
+  const me = await request('/auth/me')
+  assert.equal(me.body.data.username, 'merge_user')
+  assert.deepEqual(me.body.data.permissions, [])
   assert.equal((await request('/devices')).body.data.total, 1)
   assert.equal((await request('/auth/logout', 'POST', {})).response.status, 204)
   assert.equal((await request('/devices')).response.status, 401)
@@ -95,14 +97,25 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const admin = await captchaLogin('owner', 'owner-test-password')
   assert.equal(admin.response.status, 200, JSON.stringify(admin.body))
   cookie = admin.response.headers.get('set-cookie').split(';')[0]
+  const adminCookie = cookie
   assert.equal((await request('/admin/overview')).response.status, 200)
+  const listed = await request('/admin/users?q=merge_user')
+  const mergeUser = listed.body.data.items.find((item) => item.username === 'merge_user')
+  const resetUser = await request(`/admin/users/${mergeUser.id}/password`, 'PUT', { version: mergeUser.version })
+  assert.equal(resetUser.response.status, 200, JSON.stringify(resetUser.body))
+  assert.match(resetUser.body.data.password, /^Ld[A-Za-z]{2}\d{2}-[A-Za-z]{4}-\d{4}$/)
+  assert.equal((await request('/auth/login', 'POST', { username: 'merge_user', password: 'test-password-123' })).response.status, 401)
+  const relogin = await request('/auth/login', 'POST', { username: 'merge_user', password: resetUser.body.data.password })
+  assert.equal(relogin.response.status, 200, JSON.stringify(relogin.body))
+  cookie = adminCookie
 
   const ownerCookie = cookie
   const accountsBefore = await request('/admin/accounts')
   assert.equal(accountsBefore.response.status, 200)
   assert.equal(accountsBefore.body.data.items.length, 1)
   const ownerAccount = accountsBefore.body.data.items[0]
-  assert.equal(ownerAccount.role, 'owner')
+  assert.equal(ownerAccount.role, 'admin')
+  assert.ok(admin.body.data.user.permissions.includes('accounts.manage'))
 
   const createdOperator = await request('/admin/accounts', 'POST', {
     username: 'ops_user',
@@ -130,6 +143,35 @@ test('merged account, device, maintenance and deployment tools', async t => {
   cookie = operatorLogin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/accounts')).response.status, 403)
   cookie = ownerCookie
+
+  const partner = await request('/admin/accounts', 'POST', {
+    username: 'partner_user',
+    password: 'partner-password-1',
+    role: 'partner',
+  })
+  assert.equal(partner.response.status, 201, JSON.stringify(partner.body))
+  const auditor = await request('/admin/accounts', 'POST', {
+    username: 'audit_user',
+    password: 'auditor-password-1',
+    role: 'auditor',
+  })
+  assert.equal(auditor.response.status, 201, JSON.stringify(auditor.body))
+  const catalog = await request('/admin/permissions')
+  assert.equal(catalog.response.status, 200, JSON.stringify(catalog.body))
+  assert.deepEqual(catalog.body.data.roles.map((item) => item.key), ['admin', 'operator', 'support', 'auditor', 'partner', 'user'])
+  const partnerLogin = await captchaLogin('partner_user', 'partner-password-1')
+  assert.equal(partnerLogin.response.status, 200, JSON.stringify(partnerLogin.body))
+  cookie = partnerLogin.response.headers.get('set-cookie').split(';')[0]
+  assert.equal((await request('/admin/overview')).response.status, 200)
+  assert.equal((await request('/admin/users')).response.status, 403)
+  assert.equal((await request('/admin/accounts')).response.status, 403)
+  const auditorLogin = await captchaLogin('audit_user', 'auditor-password-1')
+  cookie = auditorLogin.response.headers.get('set-cookie').split(';')[0]
+  assert.equal((await request('/admin/audit-logs')).response.status, 200)
+  assert.equal((await request('/admin/settings')).response.status, 403)
+  cookie = ownerCookie
+  assert.equal((await request(`/admin/accounts/${partner.body.data.id}`, 'DELETE', { version: partner.body.data.version })).response.status, 204)
+  assert.equal((await request(`/admin/accounts/${auditor.body.data.id}`, 'DELETE', { version: auditor.body.data.version })).response.status, 204)
 
   assert.equal((await request(`/admin/accounts/${operator.id}`, 'PATCH', {
     status: 'disabled',
@@ -174,7 +216,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const secondOwner = await request('/admin/accounts', 'POST', {
     username: 'owner_two',
     password: 'owner-two-password',
-    role: 'owner',
+    role: 'admin',
   })
   assert.equal(secondOwner.response.status, 201, JSON.stringify(secondOwner.body))
   assert.equal((await request(`/admin/accounts/${secondOwner.body.data.id}`, 'DELETE', {

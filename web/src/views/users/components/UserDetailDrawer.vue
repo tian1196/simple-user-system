@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import { updateUserStatus, getUser } from '@/api/users'
+import { getUser, resetUserPassword, updateUserStatus } from '@/api/users'
 import type { AdminUserItem, UserStatus } from '@/api/types'
 import { ApiError } from '@/api/request'
+import { copyText } from '@/utils/clipboard'
 import { formatDateTime, initialOf, shortId } from '@/utils/format'
 
 const props = defineProps<{
@@ -24,6 +25,7 @@ const visible = computed({
 
 const loading = ref(false)
 const toggling = ref(false)
+const resetting = ref(false)
 const loadFailed = ref(false)
 const user = ref<AdminUserItem | null>(null)
 
@@ -86,6 +88,52 @@ async function toggleStatus(): Promise<void> {
   }
 }
 
+async function resetPassword(): Promise<void> {
+  if (!user.value) return
+  const current = user.value
+  try {
+    await ElMessageBox.confirm(
+      `将为「${current.username}」生成一组新密码，并立即退出该账号的全部登录。旧的恢复码也会失效。`,
+      '重置密码',
+      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  resetting.value = true
+  try {
+    const result = await resetUserPassword(current.id, current.version)
+    user.value = result.user
+    emit('changed')
+    try {
+      await ElMessageBox.alert(
+        h('div', [
+          h('p', { style: 'margin:0;line-height:1.6' }, '新密码只显示这一次，请复制后交给用户。'),
+          h(
+            'code',
+            {
+              style:
+                'display:block;margin-top:10px;padding:10px 12px;font-size:16px;letter-spacing:0.04em;background:#f4f6fa;border-radius:8px;',
+            },
+            result.password,
+          ),
+        ]),
+        '密码已重置',
+        { confirmButtonText: '复制密码' },
+      )
+      const copied = await copyText(result.password)
+      ElMessage.success(copied ? '密码已复制' : '请手动复制弹窗里的密码')
+    } catch {
+      // 关掉弹窗时密码不再展示
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) await load(current.id)
+  } finally {
+    resetting.value = false
+  }
+}
+
 function lastLoginText(value: number | null): string {
   return value ? formatDateTime(value) : '从未登录'
 }
@@ -141,6 +189,9 @@ function lastLoginText(value: number | null): string {
         />
 
         <div class="drawer-actions">
+          <el-button type="warning" plain :loading="resetting" @click="resetPassword">
+            重置密码
+          </el-button>
           <el-button
             v-if="user.status === 'active'"
             type="danger"

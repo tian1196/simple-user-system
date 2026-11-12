@@ -89,7 +89,7 @@ onMounted(load)
 
 <template>
   <div class="page">
-    <PageHeader title="运营配置" description="全局开关只允许所有者修改；每次变更都会写入操作审计。">
+    <PageHeader title="运营配置" description="全局开关只允许管理员修改；每次变更都会写入操作审计。">
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </PageHeader>
 
@@ -146,7 +146,7 @@ onMounted(load)
     </div>
 
     <p class="config-footnote">
-      权限说明：运营者可以查看概览、处理账号与邀请；只有所有者可以访问运营配置和操作审计。
+      权限说明：管理员拥有全部权限。运营处理账号和邀请，客服处理账号，审计只读，第三方只能看汇总。
     </p>
   </div>
 </template>

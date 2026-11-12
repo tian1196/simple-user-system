@@ -1,4 +1,6 @@
-export type AdminRole = 'owner' | 'operator'
+import type { PermissionKey, StaffRole } from '@/constants/access'
+
+export type AdminRole = StaffRole
 
 export type UserStatus = 'active' | 'disabled'
 export type UserStatusFilter = UserStatus | 'all'
@@ -11,6 +13,7 @@ export interface AdminProfile {
   status: UserStatus
   created_at: number
   last_login_at: number | null
+  permissions: PermissionKey[]
 }
 
 export interface LoginPayload {
@@ -115,6 +118,25 @@ export interface AuditLogItem {
   target_type: string | null
   target_id: string | null
   actor: string | null
+}
+
+export interface PermissionItem {
+  key: PermissionKey
+  name: string
+  description: string
+}
+
+export interface RoleItem {
+  key: string
+  name: string
+  description: string
+  staff: boolean
+  permissions: PermissionKey[]
+}
+
+export interface PermissionCatalog {
+  permissions: PermissionItem[]
+  roles: RoleItem[]
 }
 
 export interface ListResult<T> {

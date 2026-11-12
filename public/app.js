@@ -77,7 +77,8 @@ function navigate(path, { replace = false } = {}) {
 function header(path) {
   const adminArea = path.startsWith('/admin') && path !== '/admin/login'
   if (adminArea) {
-    const role = state.admin?.role === 'owner' ? '所有者' : '运营者'
+    const roleNames = { admin: '管理员', owner: '管理员', operator: '运营', support: '客服', auditor: '审计', partner: '第三方' }
+    const role = roleNames[state.admin?.role] || '后台账号'
     return `<header class="header"><a class="brand" href="/admin"><i></i>设备台账 / 管理后台</a><nav class="nav"><span class="tag">${role}</span><a href="/admin/login" data-logout="admin">退出</a></nav></header>`
   }
   const account = state.me ? `<a href="/app/account">${esc(state.me.username)}</a>` : '<a href="/login">登录</a>'
@@ -181,15 +182,19 @@ function accountView() {
   return `<div class="wrap prose"><div class="eyebrow">ACCOUNT</div><h1>账户与数据</h1><p class="muted">用户名 ${esc(state.me.username)} · 不绑定手机号或邮箱</p><div class="stack section"><section class="card"><h2>账号安全</h2><p>修改密码后需要重新登录，并会得到一组新的恢复码。</p><button data-action="password">修改密码</button></section><section class="card"><h2>带走你的数据</h2><p class="muted">完整 JSON 包含设备、计划和记录，不包含登录凭证。导出前要再输入一次密码。</p><div class="row"><button data-action="export">导出完整数据 JSON</button><button data-action="calendar">导出未来事项 ICS</button></div></section><section class="card"><h2>注销账户</h2><p class="muted">删除当前账户和台账，无回收站。</p><button class="danger" data-action="delete-account">注销账户</button></section><button data-action="logout">退出登录</button></div></div>`
 }
 
+function adminCan(permission) {
+  const list = state.admin && state.admin.permissions
+  if (Array.isArray(list)) return list.includes(permission)
+  const role = state.admin && state.admin.role
+  return role === 'admin' || role === 'owner'
+}
+
 function adminShell(path, content) {
-  const items = [
-    ['/admin', '概览'],
-    ['/admin/users', '账号管理'],
-    ['/admin/invites', '邀请管理'],
-  ]
-  if (state.admin?.role === 'owner') {
-    items.push(['/admin/settings', '运营配置'], ['/admin/audit', '操作审计'])
-  }
+  const items = [['/admin', '概览']]
+  if (adminCan('users.read')) items.push(['/admin/users', '账号管理'])
+  if (adminCan('invites.manage')) items.push(['/admin/invites', '邀请管理'])
+  if (adminCan('audit.read')) items.push(['/admin/audit', '操作审计'])
+  if (adminCan('settings.manage')) items.push(['/admin/settings', '运营配置'])
   const nav = items.map(([href, label]) => `<a class="${path === href ? 'active' : ''}" href="${href}">${label}</a>`).join('')
   return `<div class="layout"><aside class="sidebar">${nav}</aside><main class="admin-main">${content}</main></div>`
 }
@@ -224,18 +229,18 @@ async function adminInvites() {
 }
 
 async function adminSettings() {
-  if (state.admin?.role !== 'owner') return adminShell('/admin/settings', '<div class="empty"><h1>无权限访问</h1><p>运营者不能修改配置。</p></div>')
+  if (!adminCan('settings.manage')) return adminShell('/admin/settings', '<div class="empty"><h1>无权限访问</h1><p>当前角色不能修改配置。</p></div>')
   const data = await api('/admin/settings')
   state.settings = Object.fromEntries(data.items.map((item) => [item.key, item]))
   const row = (key, title, text) => {
     const item = state.settings[key]
     return `<div class="list-item"><div><h3>${title}</h3><p class="muted">${text}</p></div><button data-action="setting" data-id="${key}">${item.value ? '已开启 · 点击关闭' : '已关闭 · 点击开启'}</button></div>`
   }
-  return adminShell('/admin/settings', `<h1>运营配置</h1><p class="muted">只有所有者可以修改。</p><div class="card section">${row('registration_enabled', '允许邀请注册', '关闭后不影响已有账户登录。')}${row('writes_enabled', '允许业务写入', '关闭后仍允许登录、导出、注销和安全操作。')}</div>`)
+  return adminShell('/admin/settings', `<h1>运营配置</h1><p class="muted">只有管理员可以修改。</p><div class="card section">${row('registration_enabled', '允许邀请注册', '关闭后不影响已有账户登录。')}${row('writes_enabled', '允许业务写入', '关闭后仍允许登录、导出、注销和安全操作。')}</div>`)
 }
 
 async function adminAudit() {
-  if (state.admin?.role !== 'owner') return adminShell('/admin/audit', '<div class="empty"><h1>无权限访问</h1><p>运营者不能查看审计。</p></div>')
+  if (!adminCan('audit.read')) return adminShell('/admin/audit', '<div class="empty"><h1>无权限访问</h1><p>当前角色不能查看审计。</p></div>')
   const data = await api('/admin/audit-logs')
   const rows = data.items.length
     ? data.items.map((item) => `<tr><td>${new Date(item.created_at).toLocaleString('zh-CN')}</td><td>${esc(item.actor || '—')}</td><td>${esc(item.action)}</td><td>${esc(item.target_id || '—')}</td><td>${item.result === 'success' ? '成功' : '失败'}</td></tr>`).join('')

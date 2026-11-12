@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 
 import { adminLogin, adminLogout, getAdminProfile } from '@/api/auth'
 import type { AdminProfile, LoginPayload } from '@/api/types'
+import { ROLE_LABELS, type PermissionKey, type StaffRole } from '@/constants/access'
 
 const PROFILE_KEY = 'ledger.admin.profile'
 
@@ -12,8 +13,16 @@ export const useAuthStore = defineStore('auth', () => {
   const loading = ref(false)
 
   const isAuthenticated = computed(() => user.value !== null)
-  const isOwner = computed(() => user.value?.role === 'owner')
-  const roleLabel = computed(() => (user.value?.role === 'owner' ? '所有者' : '运营者'))
+  const isAdmin = computed(() => user.value?.role === 'admin')
+  const roleLabel = computed(() => {
+    const role = user.value?.role
+    if (role && role in ROLE_LABELS) return ROLE_LABELS[role as StaffRole]
+    return '后台账号'
+  })
+
+  function can(permission: PermissionKey): boolean {
+    return Boolean(user.value?.permissions?.includes(permission))
+  }
   const displayName = computed(() => user.value?.username || '管理员')
 
   async function login(payload: LoginPayload): Promise<AdminProfile> {
@@ -67,8 +76,9 @@ export const useAuthStore = defineStore('auth', () => {
     initialized,
     loading,
     isAuthenticated,
-    isOwner,
+    isAdmin,
     roleLabel,
+    can,
     displayName,
     login,
     fetchProfile,

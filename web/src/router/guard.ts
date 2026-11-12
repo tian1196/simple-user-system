@@ -28,7 +28,7 @@ export function setupRouterGuard(router: Router): void {
       }
     }
 
-    if (to.meta.roles && auth.user && !to.meta.roles.includes(auth.user.role)) {
+    if (to.meta.permission && !auth.can(to.meta.permission)) {
       ElMessage.warning('当前账号没有访问该页面的权限')
       return { name: 'Dashboard' }
     }

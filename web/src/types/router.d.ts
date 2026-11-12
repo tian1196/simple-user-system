@@ -1,4 +1,4 @@
-import type { AdminRole } from '@/api/types'
+import type { PermissionKey } from '@/constants/access'
 
 export {}
 
@@ -8,8 +8,8 @@ declare module 'vue-router' {
     title?: string
     /** 未登录也可访问 */
     public?: boolean
-    /** 允许访问的角色，不配置表示所有已登录管理员 */
-    roles?: AdminRole[]
+    /** 访问该页需要的权限，不配置表示所有已登录后台账号 */
+    permission?: PermissionKey
     /** 是否在侧边菜单隐藏 */
     hidden?: boolean
   }

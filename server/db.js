@@ -19,6 +19,7 @@ const bcrypt = require('bcryptjs')
 const { DatabaseSync } = require('node:sqlite')
 const { openDatabase, transaction } = require('./database-tools')
 const dates = require('./dates')
+const access = require('./permissions')
 
 /**
  * 默认使用本机 data/ledger.sqlite。
@@ -113,7 +114,13 @@ function publicUser(row) {
     status: row.status,
     created_at: row.created_at,
     last_login_at: row.last_login_at || null,
+    permissions: access.permissionsOf(row.role),
   }
+}
+
+/** 管理后台身份与用户端使用同一份公开字段，权限都按角色现算。 */
+function adminPublicUser(row) {
+  return publicUser(row)
 }
 
 /**
@@ -134,7 +141,7 @@ function migrate() {
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
-      role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'operator', 'owner')),
+      role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin', 'operator', 'support', 'auditor', 'partner')),
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
       mfa_secret_enc TEXT,
       created_at INTEGER NOT NULL,
@@ -275,6 +282,51 @@ function migrate() {
   `)
   insertSetting.run('registration_enabled', now)
   insertSetting.run('writes_enabled', now)
+  migrateUserRoles()
+}
+
+/**
+ * 把旧的 owner 角色升成 admin，并放宽角色约束。
+ * SQLite 不能直接改 CHECK，所以在发现旧表时重建 users。
+ */
+function migrateUserRoles() {
+  const row = database.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`).get()
+  if (!row || String(row.sql).includes("'partner'")) return
+  database.exec('PRAGMA foreign_keys = OFF')
+  try {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      DROP TABLE IF EXISTS users_next;
+      CREATE TABLE users_next (
+        id TEXT PRIMARY KEY NOT NULL,
+        username TEXT NOT NULL UNIQUE CHECK(length(username) BETWEEN 4 AND 32 AND username NOT GLOB '*[^a-z0-9_]*'),
+        role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin', 'operator', 'support', 'auditor', 'partner')),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+        mfa_secret_enc TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_login_at INTEGER,
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)
+      );
+      INSERT INTO users_next (
+        id, username, role, status, mfa_secret_enc, created_at, updated_at, last_login_at, version
+      )
+      SELECT id, username,
+             CASE role WHEN 'owner' THEN 'admin' ELSE role END,
+             status, mfa_secret_enc, created_at, updated_at, last_login_at, version
+      FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_next RENAME TO users;
+      CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+      CREATE INDEX IF NOT EXISTS idx_users_created ON users(created_at, id);
+      COMMIT;
+    `)
+  } catch (error) {
+    try { database.exec('ROLLBACK') } catch { /* 事务未打开时忽略 */ }
+    throw error
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON')
+  }
 }
 
 /**
@@ -299,7 +351,7 @@ function seedLocalAccounts() {
   const tx = database.transaction(() => {
     database.prepare(`
       INSERT INTO users (id, username, role, status, created_at, updated_at, version)
-      VALUES (?, ?, 'owner', 'active', ?, ?, 1)
+      VALUES (?, ?, 'admin', 'active', ?, ?, 1)
     `).run(ownerId, LOCAL_OWNER, now, now)
     database.prepare(`
       INSERT INTO auth_identities (
@@ -447,7 +499,7 @@ function assertReauth(token) {
 /**
  * login —— 统一登录（用户端 / 管理后台共用）。
  * 校验 bcrypt 口令、账号状态，并按 client_type 限制角色入口：
- * 用户端只允许普通用户，管理端只允许 owner/operator。
+ * 用户端只允许普通用户，管理端只允许后台角色。
  * 管理端图形验证码在路由层校验，不在这里处理。
  * 成功更新最近登录时间、写成功审计并下发新会话；失败写失败审计。
  * @param {string} username
@@ -467,13 +519,17 @@ function login(username, password, clientType, meta) {
   if (clientType === 'web' && user.role !== 'user') {
     throw fail(403, 'FORBIDDEN', '管理账号请从后台登录')
   }
-  if (clientType === 'admin' && user.role === 'user') {
+  if (clientType === 'admin' && !access.isStaffRole(user.role)) {
     throw fail(401, 'INVALID_CREDENTIALS', '用户名或密码错误')
   }
   const now = Date.now()
   database.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(now, now, user.id)
   writeAudit({ ...meta, actorId: user.id, action: 'login_success', result: 'success', detail: { client: clientType } })
-  return { token: createSession(user.id, clientType), user: publicUser({ ...user, last_login_at: now }) }
+  const profile = { ...user, last_login_at: now }
+  return {
+    token: createSession(user.id, clientType),
+    user: clientType === 'admin' ? adminPublicUser(profile) : publicUser(profile),
+  }
 }
 
 /**
@@ -1270,7 +1326,61 @@ function setUserStatus(actorId, userId, status, version, meta) {
 }
 
 /**
- * 按 id 取管理员账号（owner/operator），不存在抛 404。
+ * 生成可读但不弱的重置密码：含大小写、数字和连字符，避开易混字符。
+ * @returns {string}
+ */
+function generateUserResetPassword() {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+  const digits = '23456789'
+  const pick = (set, count) => Array.from({ length: count }, () => set[crypto.randomInt(set.length)]).join('')
+  return `Ld${pick(letters, 2)}${pick(digits, 2)}-${pick(letters, 4)}-${pick(digits, 4)}`
+}
+
+/**
+ * resetUserPassword —— 把普通用户密码重置为随机密码。
+ * 明文只在返回值里出现一次；同时作废恢复码并撤销全部会话。
+ * @param {string} actorId
+ * @param {string} userId
+ * @param {number} version
+ * @param {object} meta
+ * @returns {{ user: object, password: string }}
+ */
+function resetUserPassword(actorId, userId, version, meta) {
+  const user = adminUser(userId)
+  if (Number(version) !== user.version) throw fail(409, 'VERSION_CONFLICT', '账户已被修改，请刷新后再试')
+  const identity = database.prepare(`
+    SELECT id FROM auth_identities WHERE user_id = ? AND provider = 'password'
+  `).get(userId)
+  if (!identity) throw fail(404, 'NOT_FOUND', '登录凭据不存在')
+  const password = generateUserResetPassword()
+  const now = Date.now()
+  const tx = database.transaction(() => {
+    const updated = database.prepare(`
+      UPDATE users SET updated_at = ?, version = version + 1
+      WHERE id = ? AND role = 'user' AND version = ?
+    `).run(now, userId, user.version)
+    if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '账户已被修改，请刷新后再试')
+    database.prepare(`
+      UPDATE auth_identities
+      SET password_hash = ?, recovery_code_hash = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(bcrypt.hashSync(password, 10), now, identity.id)
+    database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+  })
+  tx()
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'user_password_reset',
+    targetType: 'user',
+    targetId: userId,
+    result: 'success',
+  })
+  return { user: adminUser(userId), password }
+}
+
+/**
+ * 按 id 取后台账号，不存在或是普通用户时抛 404。
  * @param {string} userId
  * @returns {object}
  */
@@ -1278,59 +1388,59 @@ function adminAccount(userId) {
   const row = database.prepare(`
     SELECT id, username, role, status, created_at, last_login_at, version
     FROM users
-    WHERE id = ? AND role IN ('owner', 'operator')
+    WHERE id = ? AND role IN (${access.staffInSql()})
   `).get(userId)
   if (!row) throw fail(404, 'NOT_FOUND', '管理员账号不存在')
   return row
 }
 
 /**
- * listAdminAccounts —— 列出全部管理员账号，所有者排在前面。
+ * listAdminAccounts —— 列出全部后台账号，按权限从高到低排列。
  * @returns {object[]}
  */
 function listAdminAccounts() {
   return database.prepare(`
     SELECT id, username, role, status, created_at, last_login_at, version
     FROM users
-    WHERE role IN ('owner', 'operator')
-    ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at ASC
+    WHERE role IN (${access.staffInSql()})
+    ORDER BY ${access.roleOrderSql()}, created_at ASC
   `).all()
 }
 
 /**
- * 统计除指定账号外、处于启用状态的所有者数量，用于“最后所有者”保护。
+ * 统计除指定账号外、处于启用状态的管理员数量，用于“最后管理员”保护。
  * @param {string} excludeId
  * @returns {number}
  */
 function countOtherActiveOwners(excludeId) {
   return database.prepare(`
     SELECT COUNT(*) AS n FROM users
-    WHERE role = 'owner' AND status = 'active' AND id <> ?
+    WHERE role = 'admin' AND status = 'active' AND id <> ?
   `).get(excludeId).n
 }
 
 /**
- * 最后所有者保护：若目标是唯一启用中的所有者，
- * 任何会让它降级/停用/删除的操作都抛 409（LAST_OWNER）。
+ * 最后管理员保护：若目标是唯一启用中的管理员，
+ * 任何会让它降级、停用或删除的操作都抛 409（LAST_ADMIN）。
  * @param {object} account 目标账号
  * @param {string|null} nextRole 变更后角色
  * @param {string|null} nextStatus 变更后状态
  */
 function assertActiveOwnerPreserved(account, nextRole, nextStatus) {
-  if (account.role !== 'owner' || account.status !== 'active') return
-  if (nextRole === 'owner' && nextStatus === 'active') return
+  if (account.role !== 'admin' || account.status !== 'active') return
+  if (nextRole === 'admin' && nextStatus === 'active') return
   if (countOtherActiveOwners(account.id) === 0) {
-    throw fail(409, 'LAST_OWNER', '至少需要保留一个启用状态的所有者')
+    throw fail(409, 'LAST_ADMIN', '至少需要保留一个启用状态的管理员')
   }
 }
 
 /**
- * 校验管理员角色只能是 owner / operator，否则抛 400。
+ * 校验后台角色，普通用户不能从这里分配。
  * @param {string} role
  */
 function assertValidAdminRole(role) {
-  if (!['owner', 'operator'].includes(role)) {
-    throw fail(400, 'VALIDATION_ERROR', '管理员角色只能是 owner 或 operator')
+  if (!access.isStaffRole(role)) {
+    throw fail(400, 'VALIDATION_ERROR', '后台角色只能是管理员、运营、客服、审计或第三方')
   }
 }
 
@@ -1421,7 +1531,7 @@ function updateAdminAccount(actorId, userId, { role, status, version }, meta) {
   const result = database.prepare(`
     UPDATE users
     SET role = ?, status = ?, updated_at = ?, version = version + 1
-    WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+    WHERE id = ? AND role IN (${access.staffInSql()}) AND version = ?
   `).run(nextRole, nextStatus, now, userId, account.version)
   if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
   if (nextStatus === 'disabled') database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
@@ -1462,7 +1572,7 @@ function resetAdminPassword(actorId, userId, password, version, meta, keepToken 
   const tx = database.transaction(() => {
     const updated = database.prepare(`
       UPDATE users SET updated_at = ?, version = version + 1
-      WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+      WHERE id = ? AND role IN (${access.staffInSql()}) AND version = ?
     `).run(now, userId, account.version)
     if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
     database.prepare(`
@@ -1501,7 +1611,7 @@ function deleteAdminAccount(actorId, userId, version, meta) {
   if (account.id === actorId) throw fail(409, 'SELF_ACTION', '不能删除当前登录账号')
   assertActiveOwnerPreserved(account, null, null)
   const result = database.prepare(`
-    DELETE FROM users WHERE id = ? AND role IN ('owner', 'operator') AND version = ?
+    DELETE FROM users WHERE id = ? AND role IN (${access.staffInSql()}) AND version = ?
   `).run(userId, account.version)
   if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '管理员账号已被修改，请刷新后再试')
   writeAudit({
@@ -1629,6 +1739,7 @@ module.exports = {
   POLICY_VERSION,
   CATEGORIES,
   publicUser,
+  adminPublicUser,
   sessionUser,
   revokeSession,
   login,
@@ -1658,6 +1769,7 @@ module.exports = {
   listAdminUsers,
   adminUser,
   setUserStatus,
+  resetUserPassword,
   adminAccount,
   listAdminAccounts,
   createAdminAccount,

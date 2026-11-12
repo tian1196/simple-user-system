@@ -12,6 +12,7 @@ import {
 } from '@/api/accounts'
 import { ApiError } from '@/api/request'
 import type { AdminAccountItem, AdminRole, UserStatus } from '@/api/types'
+import { ROLE_LABELS, STAFF_ROLES, roleTagType } from '@/constants/access'
 import PageHeader from '@/components/PageHeader.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -28,23 +29,21 @@ const filteredAccounts = computed(() => {
   const query = keyword.value.trim().toLowerCase()
   if (!query) return accounts.value
   return accounts.value.filter((account) => {
-    const roleText = account.role === 'owner' ? '所有者 owner' : '运营者 operator'
-    return `${account.username} ${roleText}`.toLowerCase().includes(query)
+    return `${account.username} ${ROLE_LABELS[account.role]} ${account.role}`
+      .toLowerCase()
+      .includes(query)
   })
 })
 
-const ownerCount = computed(
-  () => accounts.value.filter((account) => account.role === 'owner').length,
-)
-const operatorCount = computed(
-  () => accounts.value.filter((account) => account.role === 'operator').length,
+const adminCount = computed(
+  () => accounts.value.filter((account) => account.role === 'admin').length,
 )
 const disabledCount = computed(
   () => accounts.value.filter((account) => account.status === 'disabled').length,
 )
-const activeOwnerCount = computed(
+const activeAdminCount = computed(
   () =>
-    accounts.value.filter((account) => account.role === 'owner' && account.status === 'active')
+    accounts.value.filter((account) => account.role === 'admin' && account.status === 'active')
       .length,
 )
 
@@ -52,20 +51,20 @@ function isSelf(account: AdminAccountItem): boolean {
   return auth.user?.id === account.id
 }
 
-function isLastActiveOwner(account: AdminAccountItem): boolean {
-  return account.role === 'owner' && account.status === 'active' && activeOwnerCount.value <= 1
+function isLastActiveAdmin(account: AdminAccountItem): boolean {
+  return account.role === 'admin' && account.status === 'active' && activeAdminCount.value <= 1
 }
 
 function canEdit(account: AdminAccountItem): boolean {
-  return !isSelf(account) && !isLastActiveOwner(account)
+  return !isSelf(account) && !isLastActiveAdmin(account)
 }
 
 function canDelete(account: AdminAccountItem): boolean {
-  return !isSelf(account) && !isLastActiveOwner(account)
+  return !isSelf(account) && !isLastActiveAdmin(account)
 }
 
 function roleLabel(role: AdminRole): string {
-  return role === 'owner' ? '所有者' : '运营者'
+  return ROLE_LABELS[role]
 }
 
 function lastLoginText(value: number | null): string {
@@ -328,7 +327,7 @@ onMounted(load)
   <div class="page">
     <PageHeader
       title="系统账号"
-      description="管理可以登录后台的所有者与运营者账号；仅所有者可访问，系统至少保留一个启用状态的所有者。"
+      description="管理可以登录后台的账号。管理员拥有最高权限，系统至少保留一个启用状态的管理员。"
     >
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       <el-button type="primary" :icon="Plus" @click="openCreate">新增管理员</el-button>
@@ -351,11 +350,7 @@ onMounted(load)
           >
           <span class="summary-divider" />
           <span
-            >所有者 <strong>{{ ownerCount }}</strong></span
-          >
-          <span class="summary-divider" />
-          <span
-            >运营者 <strong>{{ operatorCount }}</strong></span
+            >管理员 <strong>{{ adminCount }}</strong></span
           >
           <template v-if="disabledCount">
             <span class="summary-divider" />
@@ -389,7 +384,7 @@ onMounted(load)
                 <small class="mono">#{{ shortId(row.id) }}</small>
                 <span v-if="appStore.isMobile" class="account-tags">
                   <el-tag
-                    :type="row.role === 'owner' ? 'warning' : 'primary'"
+                    :type="roleTagType(row.role as AdminRole)"
                     size="small"
                     effect="light"
                     round
@@ -413,7 +408,7 @@ onMounted(load)
         <el-table-column v-if="!appStore.isMobile" label="角色" width="100">
           <template #default="{ row }">
             <el-tag
-              :type="row.role === 'owner' ? 'warning' : 'primary'"
+              :type="roleTagType(row.role as AdminRole)"
               effect="light"
               size="small"
               round
@@ -500,13 +495,15 @@ onMounted(load)
         </el-form-item>
 
         <el-form-item label="角色" prop="role">
-          <el-radio-group v-model="createForm.role">
-            <el-radio-button value="operator">运营者</el-radio-button>
-            <el-radio-button value="owner">所有者</el-radio-button>
-          </el-radio-group>
-          <p class="field-note">
-            运营者可管理普通账号与邀请；所有者额外拥有系统账号、运营配置和审计权限。
-          </p>
+          <el-select v-model="createForm.role" class="role-select">
+            <el-option
+              v-for="role in STAFF_ROLES"
+              :key="role"
+              :label="ROLE_LABELS[role]"
+              :value="role"
+            />
+          </el-select>
+          <p class="field-note">管理员权限最高。第三方只能看汇总，普通用户不在这里创建。</p>
         </el-form-item>
 
         <el-form-item label="初始密码" prop="password">
@@ -559,10 +556,14 @@ onMounted(load)
         </el-form-item>
 
         <el-form-item label="角色">
-          <el-radio-group v-model="editForm.role">
-            <el-radio-button value="operator">运营者</el-radio-button>
-            <el-radio-button value="owner">所有者</el-radio-button>
-          </el-radio-group>
+          <el-select v-model="editForm.role" class="role-select">
+            <el-option
+              v-for="role in STAFF_ROLES"
+              :key="role"
+              :label="ROLE_LABELS[role]"
+              :value="role"
+            />
+          </el-select>
         </el-form-item>
 
         <el-form-item label="状态">
@@ -578,12 +579,12 @@ onMounted(load)
         </el-form-item>
 
         <el-alert
-          v-if="editTarget?.role === 'owner' && editForm.role === 'operator'"
+          v-if="editTarget?.role === 'admin' && editForm.role !== 'admin'"
           type="warning"
           :closable="false"
           show-icon
-          title="降级为运营者"
-          description="该账号将失去系统账号、运营配置和操作审计权限。"
+          title="正在降低管理员权限"
+          description="该账号将失去系统账号、运营配置和角色分配权限。"
         />
         <el-alert
           v-if="editForm.status === 'disabled'"
@@ -665,6 +666,10 @@ onMounted(load)
 </template>
 
 <style scoped lang="scss">
+.role-select {
+  width: 100%;
+}
+
 .search-input {
   width: 240px;
 }

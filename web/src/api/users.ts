@@ -21,6 +21,17 @@ export function getUser(id: string): Promise<AdminUserItem> {
   })
 }
 
+export function resetUserPassword(
+  id: string,
+  version: number,
+): Promise<{ user: AdminUserItem; password: string }> {
+  return request<{ user: AdminUserItem; password: string }>({
+    url: `/admin/users/${encodeURIComponent(id)}/password`,
+    method: 'put',
+    data: { version },
+  })
+}
+
 export function updateUserStatus(
   id: string,
   status: UserStatus,

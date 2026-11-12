@@ -14,6 +14,7 @@ const os = require('os')
 const path = require('path')
 const express = require('express')
 const db = require('./db')
+const access = require('./permissions')
 const captcha = require('./captcha')
 
 const app = express()
@@ -148,10 +149,14 @@ function requireClient(clientType, cookieName) {
 const requireUser = requireClient('web', 'ledger_session')
 const requireAdmin = requireClient('admin', 'ledger_admin')
 
-/** requireOwner —— 在已登录管理员基础上，进一步要求角色为 owner。 */
-function requireOwner(req, res, next) {
-  if (req.user.role !== 'owner') return fail(req, res, 403, 'FORBIDDEN', '只有所有者可以执行这个操作')
-  next()
+/** requirePermission —— 已登录后台账号还必须具备指定权限。 */
+function requirePermission(permission) {
+  return (req, res, next) => {
+    if (!access.hasPermission(req.user.role, permission)) {
+      return fail(req, res, 403, 'FORBIDDEN', '当前角色没有这个权限')
+    }
+    next()
+  }
 }
 
 /** 最轻量存活检查：不查库，只证明进程在线。 */
@@ -221,7 +226,7 @@ api.get('/auth/me', requireUser, handle((req, res) => {
 }))
 
 api.get('/admin/auth/me', requireAdmin, handle((req, res) => {
-  send(req, res, db.publicUser(req.user))
+  send(req, res, db.adminPublicUser(req.user))
 }))
 
 // ---------- 账户安全：恢复码找回、再验证、改密、注销 ----------
@@ -332,31 +337,39 @@ api.get('/exports/calendar', requireUser, handle((req, res) => {
 
 // ---------- 管理后台：概览 ----------
 
-api.get('/admin/overview', requireAdmin, handle((req, res) => {
+api.get('/admin/overview', requireAdmin, requirePermission('overview.read'), handle((req, res) => {
   send(req, res, db.adminOverview())
+}))
+
+api.get('/admin/permissions', requireAdmin, requirePermission('permissions.read'), handle((req, res) => {
+  send(req, res, access.catalog())
 }))
 
 // ---------- 管理后台：普通用户管理 ----------
 
-api.get('/admin/users', requireAdmin, handle((req, res) => {
+api.get('/admin/users', requireAdmin, requirePermission('users.read'), handle((req, res) => {
   send(req, res, { items: db.listAdminUsers({ q: req.query.q, status: req.query.status }) })
 }))
 
-api.get('/admin/users/:id', requireAdmin, handle((req, res) => {
+api.get('/admin/users/:id', requireAdmin, requirePermission('users.read'), handle((req, res) => {
   send(req, res, db.adminUser(req.params.id))
 }))
 
-api.patch('/admin/users/:id/status', requireAdmin, handle((req, res) => {
+api.patch('/admin/users/:id/status', requireAdmin, requirePermission('users.manage'), handle((req, res) => {
   send(req, res, db.setUserStatus(req.user.id, req.params.id, req.body.status, req.body.version, meta(req)))
 }))
 
-// ---------- 管理后台：系统账号（owner 限定） ----------
+api.put('/admin/users/:id/password', requireAdmin, requirePermission('users.manage'), handle((req, res) => {
+  send(req, res, db.resetUserPassword(req.user.id, req.params.id, req.body.version, meta(req)))
+}))
 
-api.get('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
+// ---------- 管理后台：系统账号（管理员限定） ----------
+
+api.get('/admin/accounts', requireAdmin, requirePermission('accounts.manage'), handle((req, res) => {
   send(req, res, { items: db.listAdminAccounts() })
 }))
 
-api.post('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
+api.post('/admin/accounts', requireAdmin, requirePermission('accounts.manage'), handle((req, res) => {
   send(req, res, db.createAdminAccount(req.user.id, {
     username: req.body.username,
     password: req.body.password,
@@ -364,7 +377,7 @@ api.post('/admin/accounts', requireAdmin, requireOwner, handle((req, res) => {
   }, meta(req)), 201)
 }))
 
-api.patch('/admin/accounts/:id', requireAdmin, requireOwner, handle((req, res) => {
+api.patch('/admin/accounts/:id', requireAdmin, requirePermission('accounts.manage'), handle((req, res) => {
   send(req, res, db.updateAdminAccount(req.user.id, req.params.id, {
     role: req.body.role,
     status: req.body.status,
@@ -372,7 +385,7 @@ api.patch('/admin/accounts/:id', requireAdmin, requireOwner, handle((req, res) =
   }, meta(req)))
 }))
 
-api.put('/admin/accounts/:id/password', requireAdmin, requireOwner, handle((req, res) => {
+api.put('/admin/accounts/:id/password', requireAdmin, requirePermission('accounts.manage'), handle((req, res) => {
   send(req, res, db.resetAdminPassword(
     req.user.id,
     req.params.id,
@@ -383,39 +396,39 @@ api.put('/admin/accounts/:id/password', requireAdmin, requireOwner, handle((req,
   ))
 }))
 
-api.delete('/admin/accounts/:id', requireAdmin, requireOwner, handle((req, res) => {
+api.delete('/admin/accounts/:id', requireAdmin, requirePermission('accounts.manage'), handle((req, res) => {
   db.deleteAdminAccount(req.user.id, req.params.id, req.body.version, meta(req))
   res.status(204).end()
 }))
 
 // ---------- 管理后台：邀请码 ----------
 
-api.get('/admin/invites', requireAdmin, handle((req, res) => {
+api.get('/admin/invites', requireAdmin, requirePermission('invites.manage'), handle((req, res) => {
   send(req, res, { items: db.listInvites() })
 }))
 
-api.post('/admin/invites', requireAdmin, handle((req, res) => {
+api.post('/admin/invites', requireAdmin, requirePermission('invites.manage'), handle((req, res) => {
   send(req, res, db.createInvite(req.user.id, {
     maxUses: req.body.max_uses,
     expiresOn: req.body.expires_on,
   }, meta(req)), 201)
 }))
 
-api.post('/admin/invites/:id/revoke', requireAdmin, handle((req, res) => {
+api.post('/admin/invites/:id/revoke', requireAdmin, requirePermission('invites.manage'), handle((req, res) => {
   send(req, res, db.revokeInvite(req.user.id, req.params.id, meta(req)))
 }))
 
-// ---------- 管理后台：运营配置与审计（owner 限定） ----------
+// ---------- 管理后台：运营配置与审计 ----------
 
-api.get('/admin/settings', requireAdmin, requireOwner, handle((req, res) => {
+api.get('/admin/settings', requireAdmin, requirePermission('settings.manage'), handle((req, res) => {
   send(req, res, { items: db.getSettings() })
 }))
 
-api.patch('/admin/settings/:key', requireAdmin, requireOwner, handle((req, res) => {
+api.patch('/admin/settings/:key', requireAdmin, requirePermission('settings.manage'), handle((req, res) => {
   send(req, res, db.setSetting(req.user.id, req.params.key, req.body.value, req.body.version, meta(req)))
 }))
 
-api.get('/admin/audit-logs', requireAdmin, requireOwner, handle((req, res) => {
+api.get('/admin/audit-logs', requireAdmin, requirePermission('audit.read'), handle((req, res) => {
   send(req, res, { items: db.listAudit() })
 }))
 

@@ -11,7 +11,7 @@ CREATE TABLE schema_migrations (
 CREATE TABLE users (
  id TEXT PRIMARY KEY NOT NULL,
  username TEXT NOT NULL UNIQUE CHECK(length(username) BETWEEN 4 AND 32 AND username NOT GLOB '*[^a-z0-9_]*'),
- role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','operator','owner')),
+ role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin','operator','support','auditor','partner')),
  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
  mfa_secret_enc TEXT,
  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)*1000),
