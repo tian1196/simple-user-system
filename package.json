@@ -10,8 +10,8 @@
     "admin:dev": "npm --prefix web run dev",
     "admin:build": "npm --prefix web run build",
     "pack": "sh scripts/pack.sh",
-    "deploy": "sh scripts/deploy.sh",
-    "deploy:https": "sh scripts/deploy.sh --https",
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:https": "bash scripts/deploy.sh --https",
     "upload": "sh scripts/upload.sh",
     "prepare": "husky",
     "commit": "cz",
@@ -19,7 +19,11 @@
     "db:init": "node --env-file-if-exists=.env scripts/db-init.js",
     "db:check": "node --env-file-if-exists=.env scripts/db-check.js",
     "invite:create": "node --env-file-if-exists=.env scripts/create-invite.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "site:dev": "npm --prefix web run site:dev",
+    "site:build": "npm --prefix web run site:build",
+    "web:build": "npm --prefix web run build:all",
+    "pack:check": "node scripts/verify-package.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

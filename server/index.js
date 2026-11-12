@@ -430,15 +430,50 @@ api.get('/health/ready', handle((req, res) => {
 // 挂载 /api/v1 全部路由。
 app.use('/api/v1', api)
 
+// HTML 每次校验，避免发布后旧入口引用已移除的资源；Vite 哈希资源可长期缓存。
+const frontendStaticOptions = {
+  setHeaders(res, filename) {
+    if (path.extname(filename) === '.html') res.setHeader('Cache-Control', 'no-cache')
+    else if (/[/\\]assets[/\\].+-[a-zA-Z0-9_-]{8,}\.(js|css)$/.test(filename)) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+    }
+  },
+}
+function sendFrontendIndex(res, filename) {
+  res.setHeader('Cache-Control', 'no-cache')
+  return res.sendFile(filename)
+}
+
 // Vue 管理后台：构建产物存在时挂到 /admin，否则继续使用旧版页面
 const adminDist = process.env.ADMIN_DIST
   ? path.resolve(process.env.ADMIN_DIST)
   : path.join(__dirname, '..', 'web', 'dist')
 const adminIndex = path.join(adminDist, 'index.html')
 if (fs.existsSync(adminIndex)) {
-  app.use('/admin', express.static(adminDist))
+  app.use('/admin', express.static(adminDist, frontendStaticOptions))
   // SPA 深链接（/admin/users 等）统一回退到入口 index.html。
-  app.get(['/admin', '/admin/*'], (_req, res) => res.sendFile(adminIndex))
+  app.get(['/admin', '/admin/*'], (req, res) => {
+    if (path.extname(req.path)) return res.status(404).end()
+    return sendFrontendIndex(res, adminIndex)
+  })
+}
+
+// 用户站独立构建入口，复用同一服务与 /api/v1；保留 /admin 的现有处理。
+const siteDist = process.env.SITE_DIST
+  ? path.resolve(process.env.SITE_DIST)
+  : path.join(__dirname, '..', 'web', 'site-dist')
+const siteIndex = path.join(siteDist, 'index.html')
+if (fs.existsSync(siteIndex)) {
+  app.use((req, res, next) => {
+    if (req.path === '/admin' || req.path.startsWith('/admin/') || req.path.startsWith('/api')) return next()
+    return express.static(siteDist, frontendStaticOptions)(req, res, next)
+  })
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path === '/admin' || req.path.startsWith('/admin/')) return next()
+    // 缺失资源必须返回 404，不能返回 SPA HTML 伪装成脚本或图片。
+    if (path.extname(req.path)) return res.status(404).end()
+    return sendFrontendIndex(res, siteIndex)
+  })
 }
 
 // 旧版用户站点静态资源；其余非 API 路径回退到其入口（简单前端路由支持）。
