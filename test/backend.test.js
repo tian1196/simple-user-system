@@ -83,6 +83,10 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const me = await request('/auth/me')
   assert.equal(me.body.data.username, 'merge_user')
   assert.deepEqual(me.body.data.permissions, [])
+  assert.equal(me.body.data.workspace.plan, 'pro')
+  assert.equal(me.body.data.workspace.plan_name, '专业版')
+  assert.equal(me.body.data.workspace.device_count, 1)
+  assert.equal(me.body.data.workspace.device_limit, 100)
   assert.equal((await request('/devices')).body.data.total, 1)
   assert.equal((await request('/auth/logout', 'POST', {})).response.status, 204)
   assert.equal((await request('/devices')).response.status, 401)
@@ -164,21 +168,102 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal(saas.body.data.tenants[0].slug, 'default')
   assert.equal(saas.body.data.tenants[0].plan, 'pro')
   assert.ok(saas.body.data.plans.some((plan) => plan.key === 'free' && plan.devices === 20))
-  const customQuota = await request(`/admin/saas/tenants/${saas.body.data.tenants[0].id}`, 'PATCH', {
-    plan: 'pro',
+  const searched = await request('/admin/saas/accounts?q=merge&page=1&page_size=10')
+  assert.equal(searched.response.status, 200, JSON.stringify(searched.body))
+  assert.equal(searched.body.data.total, 1)
+  assert.equal(searched.body.data.items[0].username, 'merge_user')
+  assert.equal(searched.body.data.page, 1)
+  assert.equal(searched.body.data.page_size, 10)
+  const byRole = await request('/admin/saas/accounts?q=' + encodeURIComponent('普通用户') + '&page=1&page_size=10')
+  assert.equal(byRole.response.status, 200, JSON.stringify(byRole.body))
+  assert.ok(byRole.body.data.items.some((item) => item.username === 'merge_user'))
+  assert.equal((await request('/admin/saas/accounts?q=missing-user&page=1&page_size=10')).body.data.total, 0)
+  assert.equal((await request('/admin/saas/accounts?page=1&page_size=0')).response.status, 400)
+  const freePlan = saas.body.data.plans.find((plan) => plan.key === 'free')
+  const editedFree = await request(`/admin/saas/plans/${freePlan.id}`, 'PATCH', {
+    seats: 4,
+    devices: 15,
+    version: freePlan.version,
+  })
+  assert.equal(editedFree.response.status, 200, JSON.stringify(editedFree.body))
+  assert.equal(editedFree.body.data.devices, 15)
+  const afterEdit = await request('/admin/saas')
+  assert.equal(afterEdit.body.data.plans.find((plan) => plan.key === 'pro').devices, 100)
+  assert.equal(afterEdit.body.data.plans.find((plan) => plan.key === 'free').devices, 15)
+  assert.equal(afterEdit.body.data.tenants[0].plan, 'pro')
+  assert.equal(afterEdit.body.data.tenants[0].seat_limit, 20)
+  assert.equal(afterEdit.body.data.tenants[0].device_limit, 100)
+  const switched = await request(`/admin/saas/tenants/${afterEdit.body.data.tenants[0].id}`, 'PATCH', {
+    plan: 'free',
     status: 'active',
     seat_limit: 50,
     device_limit: 80,
-    version: saas.body.data.tenants[0].version,
+    version: afterEdit.body.data.tenants[0].version,
   })
-  assert.equal(customQuota.response.status, 200, JSON.stringify(customQuota.body))
-  assert.equal(customQuota.body.data.seat_limit, 50)
-  assert.equal(customQuota.body.data.device_limit, 80)
-  assert.equal((await request(`/admin/saas/tenants/${saas.body.data.tenants[0].id}`, 'PATCH', {
-    seat_limit: 0,
-    device_limit: 80,
-    version: customQuota.body.data.version,
+  assert.equal(switched.response.status, 200, JSON.stringify(switched.body))
+  assert.equal(switched.body.data.plan, 'free')
+  assert.equal(switched.body.data.seat_limit, 4)
+  assert.equal(switched.body.data.device_limit, 15)
+  assert.equal((await request(`/admin/saas/tenants/${switched.body.data.id}`, 'PATCH', {
+    plan: 'missing',
+    status: 'active',
+    version: switched.body.data.version,
   })).response.status, 400)
+  const backToPro = await request(`/admin/saas/tenants/${switched.body.data.id}`, 'PATCH', {
+    plan: 'pro',
+    status: 'active',
+    version: switched.body.data.version,
+  })
+  assert.equal(backToPro.response.status, 200, JSON.stringify(backToPro.body))
+  assert.equal(backToPro.body.data.seat_limit, 20)
+  assert.equal(backToPro.body.data.device_limit, 100)
+  const addedPlan = await request('/admin/saas/plans', 'POST', {
+    name: '家庭版',
+    description: '两个人用',
+    seats: 2,
+    devices: 30,
+  })
+  assert.equal(addedPlan.response.status, 201, JSON.stringify(addedPlan.body))
+  assert.equal(addedPlan.body.data.devices, 30)
+  const listedSaas = await request('/admin/saas')
+  const mergeAccount = listedSaas.body.data.accounts.find((item) => item.username === 'merge_user')
+  const ownerAccountPlan = listedSaas.body.data.accounts.find((item) => item.username === 'owner')
+  assert.equal(ownerAccountPlan.plan_key, 'pro')
+  assert.equal(ownerAccountPlan.plan_override, false)
+  assert.equal(ownerAccountPlan.device_limit, 100)
+  assert.equal(mergeAccount.device_limit, 100)
+  const assigned = await request(`/admin/saas/users/${mergeAccount.id}`, 'PATCH', {
+    plan_id: addedPlan.body.data.id,
+    device_limit: 99,
+    status: 'active',
+    version: mergeAccount.version,
+  })
+  assert.equal(assigned.response.status, 200, JSON.stringify(assigned.body))
+  assert.equal(assigned.body.data.plan_name, '家庭版')
+  assert.equal(assigned.body.data.plan_override, true)
+  assert.equal(assigned.body.data.device_limit, 30)
+  const editedFamily = await request(`/admin/saas/plans/${addedPlan.body.data.id}`, 'PATCH', {
+    seats: 2,
+    devices: 40,
+    version: addedPlan.body.data.version,
+  })
+  assert.equal(editedFamily.response.status, 200, JSON.stringify(editedFamily.body))
+  const afterDefault = await request('/admin/saas')
+  assert.equal(afterDefault.body.data.plans.find((plan) => plan.key === 'pro').devices, 100)
+  assert.equal(afterDefault.body.data.plans.find((plan) => plan.key === 'free').devices, 15)
+  const untouched = afterDefault.body.data.accounts.find((item) => item.username === 'owner')
+  const kept = afterDefault.body.data.accounts.find((item) => item.username === 'merge_user')
+  assert.equal(untouched.plan_key, 'pro')
+  assert.equal(untouched.device_limit, 100)
+  assert.equal(kept.plan_name, '家庭版')
+  assert.equal(kept.device_limit, 40)
+  const userLogin = await request('/auth/login', 'POST', { username: 'merge_user', password: resetUser.body.data.password })
+  assert.equal(userLogin.response.status, 200, JSON.stringify(userLogin.body))
+  cookie = userLogin.response.headers.get('set-cookie').split(';')[0]
+  const mine = await request('/auth/me')
+  assert.equal(mine.body.data.workspace.plan_name, '家庭版')
+  assert.equal(mine.body.data.workspace.device_limit, 40)
+  cookie = ownerCookie
   const partnerLogin = await captchaLogin('partner_user', 'partner-password-1')
   assert.equal(partnerLogin.response.status, 200, JSON.stringify(partnerLogin.body))
   cookie = partnerLogin.response.headers.get('set-cookie').split(';')[0]
@@ -191,8 +276,13 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request('/admin/audit-logs')).response.status, 200)
   assert.equal((await request('/admin/settings')).response.status, 403)
   cookie = ownerCookie
-  assert.equal((await request(`/admin/accounts/${partner.body.data.id}`, 'DELETE', { version: partner.body.data.version })).response.status, 204)
-  assert.equal((await request(`/admin/accounts/${auditor.body.data.id}`, 'DELETE', { version: auditor.body.data.version })).response.status, 204)
+  const staffNow = await request('/admin/accounts')
+  const partnerNow = staffNow.body.data.items.find((item) => item.id === partner.body.data.id)
+  const auditorNow = staffNow.body.data.items.find((item) => item.id === auditor.body.data.id)
+  const operatorNow = staffNow.body.data.items.find((item) => item.id === operator.id)
+  const ownerNow = staffNow.body.data.items.find((item) => item.id === ownerAccount.id)
+  assert.equal((await request(`/admin/accounts/${partnerNow.id}`, 'DELETE', { version: partnerNow.version })).response.status, 204)
+  assert.equal((await request(`/admin/accounts/${auditorNow.id}`, 'DELETE', { version: auditorNow.version })).response.status, 204)
 
   assert.equal((await request(`/admin/accounts/${operator.id}`, 'PATCH', {
     status: 'disabled',
@@ -201,7 +291,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
 
   const disabled = await request(`/admin/accounts/${operator.id}`, 'PATCH', {
     status: 'disabled',
-    version: operator.version,
+    version: operatorNow.version,
   })
   assert.equal(disabled.response.status, 200, JSON.stringify(disabled.body))
   assert.equal(disabled.body.data.status, 'disabled')
@@ -222,16 +312,16 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await captchaLogin('ops_user', 'ops-password-456')).response.status, 200)
 
   cookie = ownerCookie
-  assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'PATCH', {
+  assert.equal((await request(`/admin/accounts/${ownerNow.id}`, 'PATCH', {
     role: 'operator',
-    version: ownerAccount.version,
+    version: ownerNow.version,
   })).response.status, 409)
-  assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'PATCH', {
+  assert.equal((await request(`/admin/accounts/${ownerNow.id}`, 'PATCH', {
     status: 'disabled',
-    version: ownerAccount.version,
+    version: ownerNow.version,
   })).response.status, 409)
-  assert.equal((await request(`/admin/accounts/${ownerAccount.id}`, 'DELETE', {
-    version: ownerAccount.version,
+  assert.equal((await request(`/admin/accounts/${ownerNow.id}`, 'DELETE', {
+    version: ownerNow.version,
   })).response.status, 409)
 
   const secondOwner = await request('/admin/accounts', 'POST', {

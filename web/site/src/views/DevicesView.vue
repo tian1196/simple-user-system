@@ -11,7 +11,9 @@ import {
   type DueList,
 } from '../api/devices'
 import { deviceIcon, deviceOverview } from '../utils/devices'
+import { useSessionStore } from '../stores/session'
 
+const session = useSessionStore()
 const devices = ref<DeviceList | null>(null)
 const due = ref<DueList | null>(null)
 const loading = ref(true)
@@ -28,9 +30,12 @@ const icons = computed(
   () =>
     new Map(devices.value?.items.map((device) => [device.id, deviceIcon(device.category)]) || []),
 )
-const description = computed(() =>
-  due.value ? `${due.value.today} · 私人记录，仅本人可见` : '私人记录，仅本人可见',
-)
+const description = computed(() => {
+  const base = due.value ? `${due.value.today} · 私人记录，仅本人可见` : '私人记录，仅本人可见'
+  const workspace = session.user?.workspace
+  if (!workspace || !devices.value) return base
+  return `${base} · ${workspace.plan_name} ${devices.value.total} / ${workspace.device_limit} 台`
+})
 
 async function load() {
   loadController?.abort()

@@ -116,7 +116,7 @@ function publicUser(row) {
     created_at: row.created_at,
     last_login_at: row.last_login_at || null,
     permissions: access.permissionsOf(row.role),
-    workspace: workspaceSummary(row.tenant_id),
+    workspace: workspaceSummary(row),
   }
 }
 
@@ -391,9 +391,9 @@ function settingEnabled(key) {
 function assertWrites(userId) {
   if (!settingEnabled('writes_enabled')) throw fail(503, 'WRITES_PAUSED', '业务写入已暂停')
   if (!userId) return
-  const tenant = tenantByUser(userId)
-  if (tenant && !saas.isWritableStatus(tenant.status)) {
-    throw fail(402, 'SUBSCRIPTION_INACTIVE', '工作区订阅不可用，暂时不能写入')
+  const entitlement = userEntitlement(userId)
+  if (entitlement && !saas.isWritableStatus(entitlement.status)) {
+    throw fail(402, 'SUBSCRIPTION_INACTIVE', '当前套餐不可用，暂时不能写入')
   }
 }
 
@@ -471,7 +471,7 @@ function sessionUser(token, clientType) {
   if (!token) return null
   const row = database.prepare(`
     SELECT s.token_hash, s.expires_at, s.reauthenticated_at, s.client_type,
-           u.id, u.username, u.role, u.status, u.created_at, u.last_login_at, u.version
+           u.id, u.username, u.role, u.status, u.tenant_id, u.created_at, u.last_login_at, u.version
     FROM sessions s
     JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.client_type = ?
@@ -577,11 +577,14 @@ function registerWithInvite({ inviteCode, username, password, policyVersion }, m
       SELECT COUNT(*) AS n FROM users WHERE tenant_id = ? AND role = 'user'
     `).get(tenantId).n
     if (members >= tenant.seat_limit) throw fail(422, 'SEAT_LIMIT', '当前工作区席位已满')
+    const assigned = planDefaultsForTenant(tenant)
     try {
       database.prepare(`
-        INSERT INTO users (id, username, role, status, tenant_id, created_at, updated_at, version)
-        VALUES (?, ?, 'user', 'active', ?, ?, ?, 1)
-      `).run(userId, name, tenantId, now, now)
+        INSERT INTO users (
+          id, username, role, status, tenant_id, plan_id, device_limit, subscription_status,
+          created_at, updated_at, version
+        ) VALUES (?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?, 1)
+      `).run(userId, name, tenantId, assigned.planId, assigned.deviceLimit, assigned.status, now, now)
     } catch (error) {
       if (/UNIQUE constraint failed: users.username/.test(error.message)) throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
       throw error
@@ -765,8 +768,7 @@ function cleanDeviceInput(input, { partial } = {}) {
 function createDevice(userId, input) {
   assertWrites(userId)
   const count = database.prepare('SELECT COUNT(*) AS n FROM devices WHERE user_id = ?').get(userId).n
-  const tenant = tenantByUser(userId)
-  const deviceLimit = tenant?.device_limit || 100
+  const deviceLimit = userEntitlement(userId)?.device_limit || 100
   if (count >= deviceLimit) throw fail(422, 'QUOTA_EXCEEDED', `当前套餐每账号最多 ${deviceLimit} 台设备`)
   const value = cleanDeviceInput(input)
   const now = Date.now()
@@ -1498,10 +1500,24 @@ function createAdminAccount(actorId, { username, password, role }, meta) {
   const userId = crypto.randomUUID()
   const tx = database.transaction(() => {
     try {
+      const tenantId = defaultTenantId()
+      const assigned = planDefaultsForTenant(database.prepare('SELECT * FROM tenants WHERE id = ?').get(tenantId))
       database.prepare(`
-        INSERT INTO users (id, username, role, status, tenant_id, created_at, updated_at, version)
-        VALUES (?, ?, ?, 'active', ?, ?, ?, 1)
-      `).run(userId, name, nextRole, defaultTenantId(), now, now)
+        INSERT INTO users (
+          id, username, role, status, tenant_id, plan_id, device_limit, subscription_status,
+          created_at, updated_at, version
+        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, 1)
+      `).run(
+        userId,
+        name,
+        nextRole,
+        tenantId,
+        assigned.planId,
+        assigned.deviceLimit,
+        assigned.status,
+        now,
+        now,
+      )
     } catch (error) {
       if (/UNIQUE constraint failed: users.username/.test(error.message)) {
         throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
@@ -1783,6 +1799,111 @@ function ensureSaas() {
     tenant = { id }
   }
   database.prepare('UPDATE users SET tenant_id = ? WHERE tenant_id IS NULL').run(tenant.id)
+  relaxTenantPlanCheck()
+  ensurePlans()
+  if (!columnExists('users', 'plan_id')) database.exec('ALTER TABLE users ADD COLUMN plan_id TEXT')
+  if (!columnExists('users', 'device_limit')) database.exec('ALTER TABLE users ADD COLUMN device_limit INTEGER')
+  if (!columnExists('users', 'subscription_status')) {
+    database.exec('ALTER TABLE users ADD COLUMN subscription_status TEXT')
+  }
+  if (!columnExists('users', 'plan_override')) {
+    database.exec('ALTER TABLE users ADD COLUMN plan_override INTEGER NOT NULL DEFAULT 0')
+  }
+  database.prepare(`
+    UPDATE users
+    SET plan_id = (
+      SELECT p.id FROM plans p
+      JOIN tenants t ON t.plan = p.key
+      WHERE t.id = users.tenant_id
+    )
+    WHERE plan_id IS NULL
+  `).run()
+  database.prepare(`
+    UPDATE users
+    SET device_limit = (SELECT t.device_limit FROM tenants t WHERE t.id = users.tenant_id)
+    WHERE device_limit IS NULL
+  `).run()
+  database.prepare(`
+    UPDATE users
+    SET subscription_status = (SELECT t.status FROM tenants t WHERE t.id = users.tenant_id)
+    WHERE subscription_status IS NULL OR subscription_status = ''
+  `).run()
+  database.prepare(`
+    UPDATE tenants
+    SET seat_limit = (SELECT seats FROM plans WHERE key = tenants.plan),
+        device_limit = (SELECT devices FROM plans WHERE key = tenants.plan)
+    WHERE EXISTS (SELECT 1 FROM plans WHERE key = tenants.plan)
+  `).run()
+  database.prepare(`
+    UPDATE users
+    SET device_limit = (SELECT devices FROM plans WHERE id = users.plan_id)
+    WHERE plan_id IS NOT NULL
+  `).run()
+  database.prepare(`
+    UPDATE users
+    SET plan_override = 1
+    WHERE plan_override = 0
+      AND plan_id IS NOT (
+        SELECT p.id FROM plans p
+        JOIN tenants t ON t.plan = p.key
+        WHERE t.id = users.tenant_id
+      )
+  `).run()
+}
+
+/** 去掉套餐键的固定枚举，自定义套餐才能写进工作区默认套餐。 */
+function relaxTenantPlanCheck() {
+  const row = database.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tenants'`).get()
+  if (!row || !String(row.sql).includes("plan IN ('free', 'pro', 'enterprise')")) return
+  database.exec(`
+    CREATE TABLE tenants_next (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      plan TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('trialing', 'active', 'past_due', 'canceled')),
+      seat_limit INTEGER NOT NULL,
+      device_limit INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1
+    );
+    INSERT INTO tenants_next (
+      id, name, slug, plan, status, seat_limit, device_limit, created_at, updated_at, version
+    )
+    SELECT id, name, slug, plan, status, seat_limit, device_limit, created_at, updated_at, version
+    FROM tenants;
+    DROP TABLE tenants;
+    ALTER TABLE tenants_next RENAME TO tenants;
+  `)
+}
+
+/** 把内置套餐写入目录。已有同名键的不覆盖，避免改掉管理员改过的说明。 */
+function ensurePlans() {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS plans (
+      id TEXT PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      seats INTEGER NOT NULL,
+      devices INTEGER NOT NULL,
+      builtin INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1
+    );
+  `)
+  const insert = database.prepare(`
+    INSERT INTO plans (
+      id, key, name, description, seats, devices, builtin, created_at, updated_at, version
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+    ON CONFLICT(key) DO NOTHING
+  `)
+  const now = Date.now()
+  for (const plan of saas.catalog()) {
+    insert.run(crypto.randomUUID(), plan.key, plan.name, plan.description, plan.seats, plan.devices, now, now)
+  }
 }
 
 function defaultTenantId() {
@@ -1805,23 +1926,162 @@ function tenantIdForInvite(invite) {
   return defaultTenantId()
 }
 
-function workspaceSummary(tenantId) {
-  if (!tenantId) return null
-  const tenant = database.prepare(`
-    SELECT id, name, slug, plan, status, seat_limit, device_limit FROM tenants WHERE id = ?
-  `).get(tenantId)
-  if (!tenant) return null
-  const plan = saas.planOf(tenant.plan)
-  return { ...tenant, plan_name: plan ? plan.name : tenant.plan }
+function planByKey(key) {
+  if (!key) return null
+  return database.prepare('SELECT * FROM plans WHERE key = ?').get(key) || null
+}
+
+function planDefaultsForTenant(tenant) {
+  const plan = tenant ? planByKey(tenant.plan) : null
+  return {
+    planId: plan?.id || null,
+    deviceLimit: plan?.devices || tenant?.device_limit || 100,
+    status: tenant?.status || 'active',
+  }
+}
+
+/**
+ * 某个账号当前生效的套餐。设备额度和订阅状态以账号上的分配为准。
+ * @param {string} userId
+ * @returns {object|null}
+ */
+function userEntitlement(userId) {
+  const row = database.prepare(`
+    SELECT u.id, u.plan_id, u.device_limit AS user_device_limit, u.subscription_status,
+           t.id AS tenant_id, t.name, t.slug, t.plan AS tenant_plan, t.status AS tenant_status,
+           t.seat_limit, t.device_limit AS tenant_device_limit
+    FROM users u
+    LEFT JOIN tenants t ON t.id = u.tenant_id
+    WHERE u.id = ?
+  `).get(userId)
+  if (!row?.tenant_id) return null
+  const plan = row.plan_id
+    ? database.prepare('SELECT * FROM plans WHERE id = ?').get(row.plan_id)
+    : planByKey(row.tenant_plan)
+  return {
+    tenant_id: row.tenant_id,
+    name: row.name,
+    slug: row.slug,
+    plan,
+    device_limit: plan?.devices || row.user_device_limit || row.tenant_device_limit || 100,
+    status: row.subscription_status || row.tenant_status || 'active',
+    seat_limit: row.seat_limit,
+  }
+}
+
+function workspaceSummary(row) {
+  if (!row?.id) return null
+  const entitlement = userEntitlement(row.id)
+  if (!entitlement) return null
+  const deviceCount = database.prepare('SELECT COUNT(*) AS n FROM devices WHERE user_id = ?').get(row.id).n
+  const memberCount = database.prepare(`
+    SELECT COUNT(*) AS n FROM users WHERE tenant_id = ? AND role = 'user'
+  `).get(entitlement.tenant_id).n
+  return {
+    id: entitlement.tenant_id,
+    name: entitlement.name,
+    slug: entitlement.slug,
+    plan: entitlement.plan?.key || 'pro',
+    status: entitlement.status,
+    seat_limit: entitlement.seat_limit,
+    device_limit: entitlement.device_limit,
+    plan_name: entitlement.plan?.name || '专业版',
+    device_count: deviceCount,
+    member_count: memberCount,
+  }
 }
 
 /**
  * listSaas —— 套餐目录和各工作区用量。设备数只做汇总，不返回私人台账。
  * @returns {{plans: object[], tenants: object[]}}
  */
+function presentPlan(row) {
+  return {
+    id: row.id,
+    key: row.key,
+    name: row.name,
+    description: row.description,
+    seats: row.seats,
+    devices: row.devices,
+    builtin: row.builtin === 1,
+    version: row.version,
+  }
+}
+
+const SAAS_ACCOUNT_SELECT = `
+  SELECT u.id, u.username, u.role, u.plan_id, u.device_limit, u.subscription_status, u.plan_override, u.version,
+         p.key AS plan_key, p.name AS plan_name,
+         (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS device_count
+  FROM users u
+  LEFT JOIN plans p ON p.id = u.plan_id
+`
+
+function presentSaasAccount(row) {
+  return { ...row, plan_override: row.plan_override === 1 }
+}
+
+function pageSizeNumber(value) {
+  if (value === undefined || value === '') return 10
+  const number = Number(value)
+  if (!Number.isInteger(number) || number < 1 || number > 50) {
+    throw fail(400, 'VALIDATION_ERROR', '每页条数需为 1–50 的整数')
+  }
+  return number
+}
+
+function pageNumber(value, total, size) {
+  const pages = Math.max(1, Math.ceil(total / size))
+  if (value === undefined || value === '') return 1
+  const number = Number(value)
+  if (!Number.isInteger(number) || number < 1) throw fail(400, 'VALIDATION_ERROR', '页码不正确')
+  return Math.min(number, pages)
+}
+
+/**
+ * 按账号、角色名或套餐名查询可分配账号，并分页。
+ * @param {{q?: string, page?: number|string, pageSize?: number|string, all?: boolean}} [query]
+ * @returns {{items: object[], total: number, page: number, page_size: number}}
+ */
+function listSaasAccounts({ q, page, pageSize, all } = {}) {
+  const query = String(q || '').trim().toLowerCase()
+  const params = []
+  let where = ''
+  if (query) {
+    const like = `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`
+    const roles = access.catalog().roles
+      .filter((role) => role.key.includes(query) || role.name.toLowerCase().includes(query))
+      .map((role) => role.key)
+    const roleSql = roles.length ? ` OR u.role IN (${roles.map(() => '?').join(', ')})` : ''
+    where = `WHERE (lower(u.username) LIKE ? ESCAPE '\\' OR lower(IFNULL(p.name, '')) LIKE ? ESCAPE '\\'${roleSql})`
+    params.push(like, like, ...roles)
+  }
+  const total = database.prepare(`
+    SELECT COUNT(*) AS n
+    FROM users u
+    LEFT JOIN plans p ON p.id = u.plan_id
+    ${where}
+  `).get(...params).n
+  const size = all ? Math.max(total, 1) : pageSizeNumber(pageSize)
+  const current = all ? 1 : pageNumber(page, total, size)
+  const limitSql = all ? '' : 'LIMIT ? OFFSET ?'
+  const limitParams = all ? [] : [size, (current - 1) * size]
+  const items = database.prepare(`
+    ${SAAS_ACCOUNT_SELECT}
+    ${where}
+    ORDER BY u.created_at ASC, u.username ASC
+    ${limitSql}
+  `).all(...params, ...limitParams).map(presentSaasAccount)
+  return { items, total, page: current, page_size: all ? total : size }
+}
+
+function saasAccountById(userId) {
+  const row = database.prepare(`${SAAS_ACCOUNT_SELECT} WHERE u.id = ?`).get(userId)
+  return row ? presentSaasAccount(row) : null
+}
+
 function listSaas() {
   return {
-    plans: saas.catalog(),
+    plans: database.prepare('SELECT * FROM plans ORDER BY builtin DESC, created_at ASC').all().map(presentPlan),
     tenants: database.prepare(`
       SELECT t.*,
         (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.role = 'user') AS member_count,
@@ -1831,6 +2091,7 @@ function listSaas() {
       FROM tenants t
       ORDER BY t.created_at ASC
     `).all(),
+    accounts: listSaasAccounts({ all: true }).items,
   }
 }
 
@@ -1849,24 +2110,25 @@ function quotaNumber(value, label) {
 }
 
 /**
- * updateTenant —— 调整工作区套餐、订阅状态和额度。
- * 席位、每账号设备数以传入值为准，不会被套餐默认值覆盖。
+ * updateTenant —— 为工作区选择套餐和订阅状态。
+ * 席位和设备额度只来自所选套餐，不在工作区上另写一套数字。
  * @param {string} actorId
  * @param {string} tenantId
- * @param {{plan?: string, status?: string, seatLimit?: number, deviceLimit?: number, version: number}} data
+ * @param {{plan?: string, status?: string, version: number}} data
  * @param {object} meta
  * @returns {object}
  */
-function updateTenant(actorId, tenantId, { plan, status, seatLimit, deviceLimit, version }, meta) {
+function updateTenant(actorId, tenantId, { plan, status, version }, meta) {
   const current = database.prepare('SELECT * FROM tenants WHERE id = ?').get(tenantId)
   if (!current) throw fail(404, 'NOT_FOUND', '工作区不存在')
   if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '工作区已被修改，请刷新后再试')
   const nextPlan = plan === undefined ? current.plan : String(plan)
   const nextStatus = status === undefined ? current.status : String(status)
-  if (!saas.planOf(nextPlan)) throw fail(400, 'VALIDATION_ERROR', '套餐不正确')
+  const planRecord = planByKey(nextPlan)
+  if (!planRecord) throw fail(400, 'VALIDATION_ERROR', '套餐不正确')
   if (!saas.STATUSES.includes(nextStatus)) throw fail(400, 'VALIDATION_ERROR', '订阅状态不正确')
-  const nextSeats = seatLimit === undefined ? current.seat_limit : quotaNumber(seatLimit, '席位')
-  const nextDevices = deviceLimit === undefined ? current.device_limit : quotaNumber(deviceLimit, '每账号设备数')
+  const nextSeats = planRecord.seats
+  const nextDevices = planRecord.devices
   const now = Date.now()
   const updated = database.prepare(`
     UPDATE tenants
@@ -1874,6 +2136,11 @@ function updateTenant(actorId, tenantId, { plan, status, seatLimit, deviceLimit,
     WHERE id = ? AND version = ?
   `).run(nextPlan, nextStatus, nextSeats, nextDevices, now, tenantId, current.version)
   if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '工作区已被修改，请刷新后再试')
+  database.prepare(`
+    UPDATE users
+    SET plan_id = ?, device_limit = ?, subscription_status = ?, updated_at = ?, version = version + 1
+    WHERE tenant_id = ? AND plan_override = 0
+  `).run(planRecord.id, nextDevices, nextStatus, now, tenantId)
   writeAudit({
     ...meta,
     actorId,
@@ -1884,6 +2151,135 @@ function updateTenant(actorId, tenantId, { plan, status, seatLimit, deviceLimit,
     detail: { plan: nextPlan, status: nextStatus, seat_limit: nextSeats, device_limit: nextDevices },
   })
   return listSaas().tenants.find((item) => item.id === tenantId)
+}
+
+/**
+ * createSaasPlan —— 新增一个可分配的套餐。
+ * 席位和设备数属于这个套餐，选用它的工作区和账号都用这组额度。
+ * @param {string} actorId
+ * @param {{name?: string, description?: string, seats?: number, devices?: number}} data
+ * @param {object} meta
+ * @returns {object}
+ */
+function createSaasPlan(actorId, { name, description, seats, devices }, meta) {
+  const title = String(name || '').trim()
+  if (title.length < 1 || title.length > 32) throw fail(400, 'VALIDATION_ERROR', '套餐名称需为 1–32 个字')
+  const text = String(description || '').trim()
+  if (text.length > 200) throw fail(400, 'VALIDATION_ERROR', '套餐说明不能超过 200 字')
+  const seatLimit = quotaNumber(seats, '席位')
+  const deviceLimit = quotaNumber(devices, '每账号设备数')
+  const now = Date.now()
+  const id = crypto.randomUUID()
+  const key = `custom-${crypto.randomBytes(4).toString('hex')}`
+  database.prepare(`
+    INSERT INTO plans (
+      id, key, name, description, seats, devices, builtin, created_at, updated_at, version
+    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1)
+  `).run(id, key, title, text, seatLimit, deviceLimit, now, now)
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'saas_plan_create',
+    targetType: 'plan',
+    targetId: id,
+    result: 'success',
+    detail: { name: title, seats: seatLimit, devices: deviceLimit },
+  })
+  return presentPlan(database.prepare('SELECT * FROM plans WHERE id = ?').get(id))
+}
+
+/**
+ * updateSaasPlan —— 只修改一个套餐自己的额度。
+ * 正在使用该套餐的工作区和账号会跟着变，其他套餐不动。
+ * @param {string} actorId
+ * @param {string} planId
+ * @param {{seats?: number, devices?: number, version: number}} data
+ * @param {object} meta
+ * @returns {object}
+ */
+function updateSaasPlan(actorId, planId, { seats, devices, version }, meta) {
+  const current = database.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+  if (!current) throw fail(404, 'NOT_FOUND', '套餐不存在')
+  if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '套餐已被修改，请刷新后再试')
+  const seatLimit = quotaNumber(seats, '席位')
+  const deviceLimit = quotaNumber(devices, '每账号设备数')
+  const now = Date.now()
+  const updated = database.prepare(`
+    UPDATE plans
+    SET seats = ?, devices = ?, updated_at = ?, version = version + 1
+    WHERE id = ? AND version = ?
+  `).run(seatLimit, deviceLimit, now, planId, current.version)
+  if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '套餐已被修改，请刷新后再试')
+  database.prepare(`
+    UPDATE tenants
+    SET seat_limit = ?, device_limit = ?, updated_at = ?, version = version + 1
+    WHERE plan = ?
+  `).run(seatLimit, deviceLimit, now, current.key)
+  database.prepare(`
+    UPDATE users
+    SET device_limit = ?, updated_at = ?, version = version + 1
+    WHERE plan_id = ?
+  `).run(deviceLimit, now, planId)
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'saas_plan_update',
+    targetType: 'plan',
+    targetId: planId,
+    result: 'success',
+    detail: { seats: seatLimit, devices: deviceLimit },
+  })
+  return presentPlan(database.prepare('SELECT * FROM plans WHERE id = ?').get(planId))
+}
+
+/**
+ * assignUserPlan —— 把套餐分配给一个账号，不影响其他账号。
+ * @param {string} actorId
+ * @param {string} userId
+ * 单独控制时写入这个账号自己的套餐。关闭单独控制时恢复为工作区默认套餐。
+ * @param {{planId?: string, deviceLimit?: number, status?: string, followDefault?: boolean, version: number}} data
+ * @param {object} meta
+ * @returns {object}
+ */
+function assignUserPlan(actorId, userId, { planId, status, followDefault, version }, meta) {
+  const current = database.prepare('SELECT * FROM users WHERE id = ?').get(userId)
+  if (!current) throw fail(404, 'NOT_FOUND', '账号不存在')
+  if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '账号已被修改，请刷新后再试')
+  const now = Date.now()
+  let plan = null
+  let nextStatus = String(status || '')
+  let nextDevices
+  let override = 1
+  if (followDefault) {
+    const tenant = database.prepare('SELECT * FROM tenants WHERE id = ?').get(current.tenant_id)
+    const assigned = planDefaultsForTenant(tenant)
+    plan = assigned.planId ? database.prepare('SELECT * FROM plans WHERE id = ?').get(assigned.planId) : null
+    if (!plan) throw fail(400, 'VALIDATION_ERROR', '套餐不正确')
+    nextStatus = assigned.status
+    nextDevices = assigned.deviceLimit
+    override = 0
+  } else {
+    plan = database.prepare('SELECT * FROM plans WHERE id = ?').get(String(planId || ''))
+    if (!plan) throw fail(400, 'VALIDATION_ERROR', '套餐不正确')
+    if (!saas.STATUSES.includes(nextStatus)) throw fail(400, 'VALIDATION_ERROR', '订阅状态不正确')
+    nextDevices = plan.devices
+  }
+  const updated = database.prepare(`
+    UPDATE users
+    SET plan_id = ?, device_limit = ?, subscription_status = ?, plan_override = ?, updated_at = ?, version = version + 1
+    WHERE id = ? AND version = ?
+  `).run(plan.id, nextDevices, nextStatus, override, now, userId, current.version)
+  if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '账号已被修改，请刷新后再试')
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'saas_assign',
+    targetType: 'user',
+    targetId: userId,
+    result: 'success',
+    detail: { plan: plan.key, status: nextStatus, device_limit: nextDevices },
+  })
+  return saasAccountById(userId)
 }
 
 function listAudit() {
@@ -1950,6 +2346,10 @@ module.exports = {
   setSetting,
   listAudit,
   listSaas,
+  listSaasAccounts,
   updateTenant,
+  createSaasPlan,
+  updateSaasPlan,
+  assignUserPlan,
   writeAudit,
 }

@@ -1,17 +1,36 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import PageHeading from '../components/PageHeading.vue'
 import SiteButton from '../components/SiteButton.vue'
 import { useSessionStore } from '../stores/session'
 import { SiteApiError } from '../api/request'
 import { changePassword, reauthenticate, exportAccount, deleteAccount } from '../api/account'
+import { getProfile } from '../api/session'
 import { getCalendar } from '../api/devices'
 
 type Mode = 'password' | 'export' | 'delete'
 const session = useSessionStore()
 const router = useRouter()
 const username = session.user?.username || ''
+const workspace = computed(() => session.user?.workspace || null)
+const subscriptionText = computed(() => {
+  const status = workspace.value?.status
+  if (status === 'trialing') return '试用中'
+  if (status === 'past_due') return '欠费，暂时不能写入'
+  if (status === 'canceled') return '已停用，暂时不能写入'
+  return '有效'
+})
+const deviceRemaining = computed(() => {
+  const current = workspace.value
+  if (!current) return 0
+  return Math.max(0, current.device_limit - current.device_count)
+})
+const seatRemaining = computed(() => {
+  const current = workspace.value
+  if (!current) return 0
+  return Math.max(0, current.seat_limit - current.member_count)
+})
 const mode = ref<Mode | null>(null)
 const modal = ref<HTMLDialogElement | null>(null)
 const busy = ref(false)
@@ -45,7 +64,14 @@ function beforeUnload(event: BeforeUnloadEvent) {
     event.returnValue = ''
   }
 }
-onMounted(() => window.addEventListener('beforeunload', beforeUnload))
+onMounted(async () => {
+  window.addEventListener('beforeunload', beforeUnload)
+  try {
+    session.setUser(await getProfile())
+  } catch {
+    // 保留进入页面前已经拿到的登录信息
+  }
+})
 onBeforeUnmount(() => {
   active = false
   clearPasswords()
@@ -206,6 +232,35 @@ async function finish() {
       {{ pageError }} 请点击“导出日历”重试。
     </p>
     <div class="account-sections">
+      <section class="account-panel" aria-labelledby="plan-title">
+        <div class="section-heading">
+          <img src="/icons/info.svg" width="24" height="24" alt="" />
+          <h2 id="plan-title">套餐与余额</h2>
+        </div>
+        <template v-if="workspace">
+          <p class="section-description">{{ workspace.name }} · {{ subscriptionText }}</p>
+          <dl class="plan-metrics">
+            <div>
+              <dt>当前套餐</dt>
+              <dd>{{ workspace.plan_name }}</dd>
+            </div>
+            <div>
+              <dt>设备余额</dt>
+              <dd>剩余 {{ deviceRemaining }} 台</dd>
+              <p class="plan-sub">已用 {{ workspace.device_count }} / {{ workspace.device_limit }}</p>
+            </div>
+            <div>
+              <dt>席位余额</dt>
+              <dd>剩余 {{ seatRemaining }} 人</dd>
+              <p class="plan-sub">已用 {{ workspace.member_count }} / {{ workspace.seat_limit }}</p>
+            </div>
+          </dl>
+          <p v-if="workspace.status === 'past_due' || workspace.status === 'canceled'" class="plan-warning">
+            当前订阅不能新增或修改设备、维护计划。登录和查看仍然可用。
+          </p>
+        </template>
+        <p v-else class="section-description">正在读取套餐。如果这里一直空白，请刷新页面。</p>
+      </section>
       <section class="account-panel" aria-labelledby="security-title">
         <div class="section-heading">
           <img src="/icons/shield-check.svg" width="24" height="24" alt="" />
@@ -408,6 +463,35 @@ async function finish() {
   display: flex;
   flex-direction: column;
   gap: 28px;
+}
+.plan-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.plan-metrics div {
+  padding: 16px 18px;
+  background: #f4f7f1;
+  border-radius: 8px;
+}
+.plan-metrics dt {
+  color: var(--site-muted);
+  font-size: 13px;
+}
+.plan-metrics dd {
+  margin: 6px 0 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+.plan-sub {
+  margin: 4px 0 0;
+  color: var(--site-muted);
+  font-size: 13px;
+}
+.plan-warning {
+  margin: 0;
+  color: #8a4b12;
 }
 .account-panel {
   display: flex;
@@ -658,6 +742,9 @@ fieldset {
   }
   .account-field input {
     font-size: 16px;
+  }
+  .plan-metrics {
+    grid-template-columns: 1fr;
   }
 }
 </style>

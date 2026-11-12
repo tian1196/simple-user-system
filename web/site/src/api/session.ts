@@ -1,10 +1,24 @@
 import { request } from './request'
 
+export interface UserWorkspace {
+  id: string
+  name: string
+  slug: string
+  plan: string
+  plan_name: string
+  status: 'trialing' | 'active' | 'past_due' | 'canceled'
+  seat_limit: number
+  device_limit: number
+  device_count: number
+  member_count: number
+}
+
 export interface UserProfile {
   id: string
   username: string
   role: 'user' | 'operator' | 'owner'
   status: 'active' | 'disabled'
+  workspace?: UserWorkspace | null
 }
 
 export function getProfile(): Promise<UserProfile> {

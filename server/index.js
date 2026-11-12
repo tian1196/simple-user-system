@@ -424,12 +424,44 @@ api.get('/admin/saas', requireAdmin, requirePermission('saas.manage'), handle((r
   send(req, res, db.listSaas())
 }))
 
+api.get('/admin/saas/accounts', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
+  send(req, res, db.listSaasAccounts({
+    q: req.query.q,
+    page: req.query.page,
+    pageSize: req.query.page_size,
+  }))
+}))
+
 api.patch('/admin/saas/tenants/:id', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
   send(req, res, db.updateTenant(req.user.id, req.params.id, {
     plan: req.body.plan,
     status: req.body.status,
-    seatLimit: req.body.seat_limit,
-    deviceLimit: req.body.device_limit,
+    version: req.body.version,
+  }, meta(req)))
+}))
+
+api.post('/admin/saas/plans', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
+  send(req, res, db.createSaasPlan(req.user.id, {
+    name: req.body.name,
+    description: req.body.description,
+    seats: req.body.seats,
+    devices: req.body.devices,
+  }, meta(req)), 201)
+}))
+
+api.patch('/admin/saas/plans/:id', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
+  send(req, res, db.updateSaasPlan(req.user.id, req.params.id, {
+    seats: req.body.seats,
+    devices: req.body.devices,
+    version: req.body.version,
+  }, meta(req)))
+}))
+
+api.patch('/admin/saas/users/:id', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
+  send(req, res, db.assignUserPlan(req.user.id, req.params.id, {
+    planId: req.body.plan_id,
+    status: req.body.status,
+    followDefault: req.body.follow_default === true,
     version: req.body.version,
   }, meta(req)))
 }))

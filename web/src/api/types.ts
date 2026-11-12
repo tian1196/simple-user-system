@@ -135,11 +135,14 @@ export interface RoleItem {
 }
 
 export interface SaasPlan {
-  key: 'free' | 'pro' | 'enterprise'
+  id: string
+  key: string
   name: string
   description: string
   seats: number
   devices: number
+  builtin: boolean
+  version: number
 }
 
 export type SaasStatus = 'trialing' | 'active' | 'past_due' | 'canceled'
@@ -159,9 +162,31 @@ export interface SaasTenant {
   version: number
 }
 
+export interface SaasAccount {
+  id: string
+  username: string
+  role: string
+  plan_id: string | null
+  plan_key: string | null
+  plan_name: string | null
+  device_limit: number
+  device_count: number
+  subscription_status: SaasStatus
+  plan_override: boolean
+  version: number
+}
+
+export interface SaasAccountPage {
+  items: SaasAccount[]
+  total: number
+  page: number
+  page_size: number
+}
+
 export interface SaasOverview {
   plans: SaasPlan[]
   tenants: SaasTenant[]
+  accounts: SaasAccount[]
 }
 
 export interface PermissionCatalog {
