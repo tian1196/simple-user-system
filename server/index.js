@@ -420,6 +420,20 @@ api.post('/admin/invites/:id/revoke', requireAdmin, requirePermission('invites.m
 
 // ---------- 管理后台：运营配置与审计 ----------
 
+api.get('/admin/saas', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
+  send(req, res, db.listSaas())
+}))
+
+api.patch('/admin/saas/tenants/:id', requireAdmin, requirePermission('saas.manage'), handle((req, res) => {
+  send(req, res, db.updateTenant(req.user.id, req.params.id, {
+    plan: req.body.plan,
+    status: req.body.status,
+    seatLimit: req.body.seat_limit,
+    deviceLimit: req.body.device_limit,
+    version: req.body.version,
+  }, meta(req)))
+}))
+
 api.get('/admin/settings', requireAdmin, requirePermission('settings.manage'), handle((req, res) => {
   send(req, res, { items: db.getSettings() })
 }))

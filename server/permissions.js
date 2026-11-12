@@ -13,6 +13,7 @@ const PERMISSIONS = [
   { key: 'settings.manage', name: '运营配置', description: '开关注册入口和业务写入。' },
   { key: 'audit.read', name: '操作审计', description: '查看关键操作记录。' },
   { key: 'permissions.read', name: '查看权限', description: '查看各角色能做什么。' },
+  { key: 'saas.manage', name: '套餐工作区', description: '查看工作区用量，并调整套餐和订阅状态。' },
 ]
 
 const ALL_PERMISSIONS = PERMISSIONS.map((item) => item.key)

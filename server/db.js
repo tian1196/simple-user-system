@@ -20,6 +20,7 @@ const { DatabaseSync } = require('node:sqlite')
 const { openDatabase, transaction } = require('./database-tools')
 const dates = require('./dates')
 const access = require('./permissions')
+const saas = require('./saas')
 
 /**
  * 默认使用本机 data/ledger.sqlite。
@@ -115,6 +116,7 @@ function publicUser(row) {
     created_at: row.created_at,
     last_login_at: row.last_login_at || null,
     permissions: access.permissionsOf(row.role),
+    workspace: workspaceSummary(row.tenant_id),
   }
 }
 
@@ -381,9 +383,18 @@ function settingEnabled(key) {
   return JSON.parse(row.value_json) !== false
 }
 
-/** 写操作前置校验：业务写入被暂停时抛出 503（WRITES_PAUSED）。 */
-function assertWrites() {
+/**
+ * 写操作前置校验。
+ * 全局写入关闭时抛 503；工作区订阅欠费或停用时抛 402。
+ * @param {string} [userId]
+ */
+function assertWrites(userId) {
   if (!settingEnabled('writes_enabled')) throw fail(503, 'WRITES_PAUSED', '业务写入已暂停')
+  if (!userId) return
+  const tenant = tenantByUser(userId)
+  if (tenant && !saas.isWritableStatus(tenant.status)) {
+    throw fail(402, 'SUBSCRIPTION_INACTIVE', '工作区订阅不可用，暂时不能写入')
+  }
 }
 
 /**
@@ -557,11 +568,20 @@ function registerWithInvite({ inviteCode, username, password, policyVersion }, m
       WHERE id = ? AND revoked_at IS NULL AND expires_at >= ? AND used_count < max_uses
     `).run(invite.id, now)
     if (consumed.changes !== 1) throw fail(422, 'INVITE_INVALID', '邀请码无效或已用完')
+    const tenantId = tenantIdForInvite(invite)
+    const tenant = database.prepare('SELECT * FROM tenants WHERE id = ?').get(tenantId)
+    if (!tenant || !saas.isWritableStatus(tenant.status)) {
+      throw fail(402, 'SUBSCRIPTION_INACTIVE', '工作区订阅不可用，暂时不能注册')
+    }
+    const members = database.prepare(`
+      SELECT COUNT(*) AS n FROM users WHERE tenant_id = ? AND role = 'user'
+    `).get(tenantId).n
+    if (members >= tenant.seat_limit) throw fail(422, 'SEAT_LIMIT', '当前工作区席位已满')
     try {
       database.prepare(`
-        INSERT INTO users (id, username, role, status, created_at, updated_at, version)
-        VALUES (?, ?, 'user', 'active', ?, ?, 1)
-      `).run(userId, name, now, now)
+        INSERT INTO users (id, username, role, status, tenant_id, created_at, updated_at, version)
+        VALUES (?, ?, 'user', 'active', ?, ?, ?, 1)
+      `).run(userId, name, tenantId, now, now)
     } catch (error) {
       if (/UNIQUE constraint failed: users.username/.test(error.message)) throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
       throw error
@@ -743,9 +763,11 @@ function cleanDeviceInput(input, { partial } = {}) {
  * @returns {object}
  */
 function createDevice(userId, input) {
-  assertWrites()
+  assertWrites(userId)
   const count = database.prepare('SELECT COUNT(*) AS n FROM devices WHERE user_id = ?').get(userId).n
-  if (count >= 100) throw fail(422, 'QUOTA_EXCEEDED', '每账号最多 100 台设备')
+  const tenant = tenantByUser(userId)
+  const deviceLimit = tenant?.device_limit || 100
+  if (count >= deviceLimit) throw fail(422, 'QUOTA_EXCEEDED', `当前套餐每账号最多 ${deviceLimit} 台设备`)
   const value = cleanDeviceInput(input)
   const now = Date.now()
   const id = crypto.randomUUID()
@@ -765,7 +787,7 @@ function createDevice(userId, input) {
  * @returns {object}
  */
 function updateDevice(userId, deviceId, input) {
-  assertWrites()
+  assertWrites(userId)
   const current = ownedDevice(userId, deviceId)
   if (Number(input.version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '设备已被修改，请刷新后再保存')
   const value = cleanDeviceInput(input)
@@ -786,7 +808,7 @@ function updateDevice(userId, deviceId, input) {
  * @param {number} version
  */
 function deleteDevice(userId, deviceId, version) {
-  assertWrites()
+  assertWrites(userId)
   const current = ownedDevice(userId, deviceId)
   if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '设备已被修改，请刷新后再删除')
   database.prepare('DELETE FROM devices WHERE id = ? AND user_id = ? AND version = ?').run(deviceId, userId, current.version)
@@ -852,7 +874,7 @@ function ownedPlan(userId, planId) {
  * @returns {object}
  */
 function createPlan(userId, deviceId, input) {
-  assertWrites()
+  assertWrites(userId)
   ownedDevice(userId, deviceId)
   const count = database.prepare('SELECT COUNT(*) AS n FROM maintenance_plans WHERE device_id = ?').get(deviceId).n
   if (count >= 5) throw fail(422, 'QUOTA_EXCEEDED', '每台设备最多 5 个维护计划')
@@ -879,7 +901,7 @@ function createPlan(userId, deviceId, input) {
  * @returns {object}
  */
 function updatePlan(userId, planId, input) {
-  assertWrites()
+  assertWrites(userId)
   const current = ownedPlan(userId, planId)
   if (Number(input.version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再保存')
   const title = String(input.title ?? current.title).trim()
@@ -907,7 +929,7 @@ function updatePlan(userId, planId, input) {
  * @param {number} version
  */
 function deletePlan(userId, planId, version) {
-  assertWrites()
+  assertWrites(userId)
   const current = ownedPlan(userId, planId)
   if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再删除')
   database.prepare('DELETE FROM maintenance_plans WHERE id = ? AND version = ?').run(planId, current.version)
@@ -992,7 +1014,7 @@ function listLogs(userId, deviceId) {
  * @returns {{log:object, plan:object}}
  */
 function completePlan(userId, planId, input) {
-  assertWrites()
+  assertWrites(userId)
   const completedOn = String(input.completed_on || '').trim()
   const note = String(input.note || '').trim()
   const requestKey = String(input.request_key || '').trim()
@@ -1058,7 +1080,7 @@ function completePlan(userId, planId, input) {
  * @returns {object}
  */
 function createManualLog(userId, deviceId, input) {
-  assertWrites()
+  assertWrites(userId)
   ownedDevice(userId, deviceId)
   const title = String(input.title || '').trim()
   const completedOn = String(input.completed_on || '').trim()
@@ -1089,7 +1111,7 @@ function createManualLog(userId, deviceId, input) {
  * @returns {{log:object, plan:object|null}}
  */
 function voidLog(userId, logId) {
-  assertWrites()
+  assertWrites(userId)
   const log = database.prepare(`
     SELECT l.*, d.user_id
     FROM maintenance_logs l
@@ -1477,9 +1499,9 @@ function createAdminAccount(actorId, { username, password, role }, meta) {
   const tx = database.transaction(() => {
     try {
       database.prepare(`
-        INSERT INTO users (id, username, role, status, created_at, updated_at, version)
-        VALUES (?, ?, ?, 'active', ?, ?, 1)
-      `).run(userId, name, nextRole, now, now)
+        INSERT INTO users (id, username, role, status, tenant_id, created_at, updated_at, version)
+        VALUES (?, ?, ?, 'active', ?, ?, ?, 1)
+      `).run(userId, name, nextRole, defaultTenantId(), now, now)
     } catch (error) {
       if (/UNIQUE constraint failed: users.username/.test(error.message)) {
         throw fail(409, 'USERNAME_TAKEN', '用户名已被使用')
@@ -1722,6 +1744,148 @@ function setSetting(actorId, key, value, version, meta) {
  * listAudit —— 读取最近 50 条审计记录（带操作者用户名）。
  * @returns {object[]}
  */
+function columnExists(table, column) {
+  return database.prepare(`PRAGMA table_info(${table})`).all().some((item) => item.name === column)
+}
+
+/**
+ * 补齐工作区表，并把还没有工作区的账号归入默认工作区。
+ * 默认工作区使用专业版，保持原来每账号 100 台设备的额度。
+ */
+function ensureSaas() {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS tenants (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      plan TEXT NOT NULL CHECK (plan IN ('free', 'pro', 'enterprise')),
+      status TEXT NOT NULL CHECK (status IN ('trialing', 'active', 'past_due', 'canceled')),
+      seat_limit INTEGER NOT NULL,
+      device_limit INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1
+    );
+  `)
+  if (!columnExists('users', 'tenant_id')) {
+    database.exec('ALTER TABLE users ADD COLUMN tenant_id TEXT')
+  }
+  let tenant = database.prepare(`SELECT id FROM tenants WHERE slug = 'default'`).get()
+  if (!tenant) {
+    const now = Date.now()
+    const members = database.prepare(`SELECT COUNT(*) AS n FROM users WHERE role = 'user'`).get().n
+    const id = crypto.randomUUID()
+    database.prepare(`
+      INSERT INTO tenants (
+        id, name, slug, plan, status, seat_limit, device_limit, created_at, updated_at, version
+      ) VALUES (?, '默认工作区', 'default', 'pro', 'active', ?, 100, ?, ?, 1)
+    `).run(id, Math.max(20, members), now, now)
+    tenant = { id }
+  }
+  database.prepare('UPDATE users SET tenant_id = ? WHERE tenant_id IS NULL').run(tenant.id)
+}
+
+function defaultTenantId() {
+  return database.prepare(`SELECT id FROM tenants WHERE slug = 'default'`).get().id
+}
+
+function tenantByUser(userId) {
+  return database.prepare(`
+    SELECT t.* FROM tenants t
+    JOIN users u ON u.tenant_id = t.id
+    WHERE u.id = ?
+  `).get(userId) || null
+}
+
+function tenantIdForInvite(invite) {
+  if (invite?.created_by) {
+    const creator = database.prepare('SELECT tenant_id FROM users WHERE id = ?').get(invite.created_by)
+    if (creator?.tenant_id) return creator.tenant_id
+  }
+  return defaultTenantId()
+}
+
+function workspaceSummary(tenantId) {
+  if (!tenantId) return null
+  const tenant = database.prepare(`
+    SELECT id, name, slug, plan, status, seat_limit, device_limit FROM tenants WHERE id = ?
+  `).get(tenantId)
+  if (!tenant) return null
+  const plan = saas.planOf(tenant.plan)
+  return { ...tenant, plan_name: plan ? plan.name : tenant.plan }
+}
+
+/**
+ * listSaas —— 套餐目录和各工作区用量。设备数只做汇总，不返回私人台账。
+ * @returns {{plans: object[], tenants: object[]}}
+ */
+function listSaas() {
+  return {
+    plans: saas.catalog(),
+    tenants: database.prepare(`
+      SELECT t.*,
+        (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.role = 'user') AS member_count,
+        (SELECT COUNT(*) FROM devices d
+           JOIN users u ON u.id = d.user_id
+          WHERE u.tenant_id = t.id) AS device_count
+      FROM tenants t
+      ORDER BY t.created_at ASC
+    `).all(),
+  }
+}
+
+/**
+ * 校验可手填的额度：正整数，上限 100 万。
+ * @param {number|string} value
+ * @param {string} label
+ * @returns {number}
+ */
+function quotaNumber(value, label) {
+  const number = Number(value)
+  if (!Number.isInteger(number) || number < 1 || number > 1000000) {
+    throw fail(400, 'VALIDATION_ERROR', `${label}需为 1–1000000 的整数`)
+  }
+  return number
+}
+
+/**
+ * updateTenant —— 调整工作区套餐、订阅状态和额度。
+ * 席位、每账号设备数以传入值为准，不会被套餐默认值覆盖。
+ * @param {string} actorId
+ * @param {string} tenantId
+ * @param {{plan?: string, status?: string, seatLimit?: number, deviceLimit?: number, version: number}} data
+ * @param {object} meta
+ * @returns {object}
+ */
+function updateTenant(actorId, tenantId, { plan, status, seatLimit, deviceLimit, version }, meta) {
+  const current = database.prepare('SELECT * FROM tenants WHERE id = ?').get(tenantId)
+  if (!current) throw fail(404, 'NOT_FOUND', '工作区不存在')
+  if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '工作区已被修改，请刷新后再试')
+  const nextPlan = plan === undefined ? current.plan : String(plan)
+  const nextStatus = status === undefined ? current.status : String(status)
+  if (!saas.planOf(nextPlan)) throw fail(400, 'VALIDATION_ERROR', '套餐不正确')
+  if (!saas.STATUSES.includes(nextStatus)) throw fail(400, 'VALIDATION_ERROR', '订阅状态不正确')
+  const nextSeats = seatLimit === undefined ? current.seat_limit : quotaNumber(seatLimit, '席位')
+  const nextDevices = deviceLimit === undefined ? current.device_limit : quotaNumber(deviceLimit, '每账号设备数')
+  const now = Date.now()
+  const updated = database.prepare(`
+    UPDATE tenants
+    SET plan = ?, status = ?, seat_limit = ?, device_limit = ?, updated_at = ?, version = version + 1
+    WHERE id = ? AND version = ?
+  `).run(nextPlan, nextStatus, nextSeats, nextDevices, now, tenantId, current.version)
+  if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '工作区已被修改，请刷新后再试')
+  writeAudit({
+    ...meta,
+    actorId,
+    action: 'saas_update',
+    targetType: 'tenant',
+    targetId: tenantId,
+    result: 'success',
+    detail: { plan: nextPlan, status: nextStatus, seat_limit: nextSeats, device_limit: nextDevices },
+  })
+  return listSaas().tenants.find((item) => item.id === tenantId)
+}
+
 function listAudit() {
   return database.prepare(`
     SELECT a.created_at, a.action, a.result, a.target_type, a.target_id, u.username AS actor
@@ -1734,6 +1898,7 @@ function listAudit() {
 
 migrate()
 const bootstrapMessages = seedLocalAccounts()
+ensureSaas()
 
 module.exports = {
   databasePath,
@@ -1784,5 +1949,7 @@ module.exports = {
   getSettings,
   setSetting,
   listAudit,
+  listSaas,
+  updateTenant,
   writeAudit,
 }

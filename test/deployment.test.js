@@ -48,7 +48,7 @@ test('database backup includes committed WAL writes and refuses overwrite', t =>
   assert.equal(spawnSync(process.execPath, ['scripts/db-init.js'], { env }).status, 0)
   const source = new DatabaseSync(database)
   t.after(() => source.close())
-  source.exec("PRAGMA journal_mode=WAL; INSERT INTO users(id,username,role) VALUES('backup-owner','backup_owner','owner')")
+  source.exec("PRAGMA journal_mode=WAL; INSERT INTO users(id,username,role) VALUES('backup-owner','backup_owner','admin')")
   const target = path.join(dir, 'backup.sqlite')
   const result = spawnSync(process.execPath, ['scripts/backup-database.js', target], { env, encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)

@@ -11,6 +11,7 @@ export type PermissionKey =
   | 'settings.manage'
   | 'audit.read'
   | 'permissions.read'
+  | 'saas.manage'
 
 export const STAFF_ROLES: StaffRole[] = ['admin', 'operator', 'support', 'auditor', 'partner']
 

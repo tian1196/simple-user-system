@@ -48,6 +48,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '权限管理', permission: 'permissions.read' },
       },
       {
+        path: 'saas',
+        name: 'Saas',
+        component: () => import('@/views/saas/index.vue'),
+        meta: { title: '套餐工作区', permission: 'saas.manage' },
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),

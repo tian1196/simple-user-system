@@ -159,12 +159,33 @@ test('merged account, device, maintenance and deployment tools', async t => {
   const catalog = await request('/admin/permissions')
   assert.equal(catalog.response.status, 200, JSON.stringify(catalog.body))
   assert.deepEqual(catalog.body.data.roles.map((item) => item.key), ['admin', 'operator', 'support', 'auditor', 'partner', 'user'])
+  const saas = await request('/admin/saas')
+  assert.equal(saas.response.status, 200, JSON.stringify(saas.body))
+  assert.equal(saas.body.data.tenants[0].slug, 'default')
+  assert.equal(saas.body.data.tenants[0].plan, 'pro')
+  assert.ok(saas.body.data.plans.some((plan) => plan.key === 'free' && plan.devices === 20))
+  const customQuota = await request(`/admin/saas/tenants/${saas.body.data.tenants[0].id}`, 'PATCH', {
+    plan: 'pro',
+    status: 'active',
+    seat_limit: 50,
+    device_limit: 80,
+    version: saas.body.data.tenants[0].version,
+  })
+  assert.equal(customQuota.response.status, 200, JSON.stringify(customQuota.body))
+  assert.equal(customQuota.body.data.seat_limit, 50)
+  assert.equal(customQuota.body.data.device_limit, 80)
+  assert.equal((await request(`/admin/saas/tenants/${saas.body.data.tenants[0].id}`, 'PATCH', {
+    seat_limit: 0,
+    device_limit: 80,
+    version: customQuota.body.data.version,
+  })).response.status, 400)
   const partnerLogin = await captchaLogin('partner_user', 'partner-password-1')
   assert.equal(partnerLogin.response.status, 200, JSON.stringify(partnerLogin.body))
   cookie = partnerLogin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/overview')).response.status, 200)
   assert.equal((await request('/admin/users')).response.status, 403)
   assert.equal((await request('/admin/accounts')).response.status, 403)
+  assert.equal((await request('/admin/saas')).response.status, 403)
   const auditorLogin = await captchaLogin('audit_user', 'auditor-password-1')
   cookie = auditorLogin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/audit-logs')).response.status, 200)

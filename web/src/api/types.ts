@@ -134,6 +134,36 @@ export interface RoleItem {
   permissions: PermissionKey[]
 }
 
+export interface SaasPlan {
+  key: 'free' | 'pro' | 'enterprise'
+  name: string
+  description: string
+  seats: number
+  devices: number
+}
+
+export type SaasStatus = 'trialing' | 'active' | 'past_due' | 'canceled'
+
+export interface SaasTenant {
+  id: string
+  name: string
+  slug: string
+  plan: SaasPlan['key']
+  status: SaasStatus
+  seat_limit: number
+  device_limit: number
+  member_count: number
+  device_count: number
+  created_at: number
+  updated_at: number
+  version: number
+}
+
+export interface SaasOverview {
+  plans: SaasPlan[]
+  tenants: SaasTenant[]
+}
+
 export interface PermissionCatalog {
   permissions: PermissionItem[]
   roles: RoleItem[]
