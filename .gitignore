@@ -14,3 +14,4 @@ data/*.db*
 coverage/
 
 web/site-dist/
+package-lock.json.before-pull
