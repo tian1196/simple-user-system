@@ -88,6 +88,19 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal(me.body.data.workspace.device_count, 1)
   assert.equal(me.body.data.workspace.device_limit, 100)
   assert.equal((await request('/devices')).body.data.total, 1)
+  const lunch = await request('/ledger', 'POST', { kind: 'expense', category: 'food', amount: '28.50', occurred_on: '2026-11-12', note: '午餐' })
+  assert.equal(lunch.response.status, 201, JSON.stringify(lunch.body))
+  assert.equal(lunch.body.data.amount_cents, 2850)
+  assert.equal(lunch.body.data.category_label, '餐饮')
+  const pocket = await request('/ledger', 'POST', { kind: 'income', category: 'redpacket', amount: '6', occurred_on: '2026-11-12', note: '红包' })
+  assert.equal(pocket.response.status, 201, JSON.stringify(pocket.body))
+  const books = await request('/ledger?month=2026-11')
+  assert.equal(books.response.status, 200, JSON.stringify(books.body))
+  assert.equal(books.body.data.summary.expense_cents, 2850)
+  assert.equal(books.body.data.summary.income_cents, 600)
+  assert.equal(books.body.data.summary.balance_cents, -2250)
+  assert.equal(books.body.data.items.length, 2)
+  assert.equal((await request('/ledger', 'POST', { kind: 'expense', category: 'food', amount: '0', occurred_on: '2026-11-12', note: '' })).response.status, 400)
   assert.equal((await request('/auth/logout', 'POST', {})).response.status, 204)
   assert.equal((await request('/devices')).response.status, 401)
 
@@ -114,6 +127,11 @@ test('merged account, device, maintenance and deployment tools', async t => {
   cookie = adminCookie
 
   const ownerCookie = cookie
+  const everyone = await request('/admin/ledger?q=merge&month=2026-11&page=1&page_size=10')
+  assert.equal(everyone.response.status, 200, JSON.stringify(everyone.body))
+  assert.equal(everyone.body.data.total, 2)
+  assert.ok(everyone.body.data.items.every((item) => item.username === 'merge_user'))
+  assert.equal(everyone.body.data.summary.expense_cents, 2850)
   const accountsBefore = await request('/admin/accounts')
   assert.equal(accountsBefore.response.status, 200)
   assert.equal(accountsBefore.body.data.items.length, 1)
@@ -271,6 +289,7 @@ test('merged account, device, maintenance and deployment tools', async t => {
   assert.equal((await request('/admin/users')).response.status, 403)
   assert.equal((await request('/admin/accounts')).response.status, 403)
   assert.equal((await request('/admin/saas')).response.status, 403)
+  assert.equal((await request('/admin/ledger')).response.status, 403)
   const auditorLogin = await captchaLogin('audit_user', 'auditor-password-1')
   cookie = auditorLogin.response.headers.get('set-cookie').split(';')[0]
   assert.equal((await request('/admin/audit-logs')).response.status, 200)

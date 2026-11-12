@@ -284,6 +284,35 @@ api.delete('/devices/:id', requireUser, handle((req, res) => {
   res.status(204).end()
 }))
 
+// ---------- 记账 ----------
+
+api.get('/ledger', requireUser, handle((req, res) => {
+  send(req, res, db.listLedger(req.user.id, req.query.month))
+}))
+
+api.post('/ledger', requireUser, handle((req, res) => {
+  send(req, res, db.createLedgerEntry(req.user.id, req.body), 201)
+}))
+
+api.patch('/ledger/:id', requireUser, handle((req, res) => {
+  send(req, res, db.updateLedgerEntry(req.user.id, req.params.id, req.body))
+}))
+
+api.delete('/ledger/:id', requireUser, handle((req, res) => {
+  db.deleteLedgerEntry(req.user.id, req.params.id, req.body.version)
+  res.status(204).end()
+}))
+
+api.get('/admin/ledger', requireAdmin, requirePermission('ledger.read'), handle((req, res) => {
+  send(req, res, db.listAdminLedger({
+    q: req.query.q,
+    kind: req.query.kind,
+    month: req.query.month,
+    page: req.query.page,
+    pageSize: req.query.page_size,
+  }))
+}))
+
 // ---------- 维护计划 CRUD ----------
 
 api.post('/devices/:id/plans', requireUser, handle((req, res) => {

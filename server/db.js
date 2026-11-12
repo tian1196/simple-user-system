@@ -1226,6 +1226,13 @@ function exportAccount(userId, token) {
       plans: listPlans(userId, device.id),
       logs: listLogs(userId, device.id),
     })),
+    ledger: database.prepare(`
+      SELECT e.*, u.username
+      FROM ledger_entries e
+      JOIN users u ON u.id = e.user_id
+      WHERE e.user_id = ?
+      ORDER BY e.occurred_on ASC, e.created_at ASC
+    `).all(userId).map(presentLedgerEntry),
   }
 }
 
@@ -2282,6 +2289,274 @@ function assignUserPlan(actorId, userId, { planId, status, followDefault, versio
   return saasAccountById(userId)
 }
 
+const LEDGER_CATEGORIES = {
+  expense: [
+    ['food', '餐饮'],
+    ['transport', '交通'],
+    ['shopping', '购物'],
+    ['housing', '居住'],
+    ['daily', '日用'],
+    ['fun', '娱乐'],
+    ['medical', '医疗'],
+    ['study', '学习'],
+    ['social', '人情'],
+    ['other', '其他'],
+  ],
+  income: [
+    ['salary', '工资'],
+    ['bonus', '奖金'],
+    ['refund', '退款'],
+    ['redpacket', '红包'],
+    ['other', '其他'],
+  ],
+}
+
+function ledgerCatalog() {
+  return {
+    expense: LEDGER_CATEGORIES.expense.map(([key, label]) => ({ key, label })),
+    income: LEDGER_CATEGORIES.income.map(([key, label]) => ({ key, label })),
+  }
+}
+
+function ledgerCategoryLabel(kind, category) {
+  const found = (LEDGER_CATEGORIES[kind] || []).find((item) => item[0] === category)
+  return found ? found[1] : category
+}
+
+function formatYuan(cents) {
+  const abs = Math.abs(cents)
+  return `${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`
+}
+
+function amountCents(value) {
+  const text = String(value ?? '').trim()
+  if (!/^\d{1,8}(\.\d{1,2})?$/.test(text)) throw fail(400, 'VALIDATION_ERROR', '金额需为最多两位小数的正数')
+  const [yuan, frac = ''] = text.split('.')
+  const cents = Number(yuan) * 100 + Number((frac + '00').slice(0, 2))
+  if (!Number.isSafeInteger(cents) || cents < 1 || cents > 1000000000) {
+    throw fail(400, 'VALIDATION_ERROR', '金额需在 0.01–10000000 元之间')
+  }
+  return cents
+}
+
+function ledgerMonth(value) {
+  const month = String(value || dates.today().slice(0, 7)).trim()
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw fail(400, 'VALIDATION_ERROR', '月份不正确')
+  return month
+}
+
+function nextMonthStart(month) {
+  const [year, mon] = month.split('-').map(Number)
+  const date = new Date(Date.UTC(year, mon, 1))
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-01`
+}
+
+function presentLedgerEntry(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    username: row.username || null,
+    kind: row.kind,
+    category: row.category,
+    category_label: ledgerCategoryLabel(row.kind, row.category),
+    amount_cents: row.amount_cents,
+    amount: formatYuan(row.amount_cents),
+    occurred_on: row.occurred_on,
+    note: row.note,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    version: row.version,
+  }
+}
+
+function cleanLedgerInput(input) {
+  const kind = String(input.kind || '')
+  if (!LEDGER_CATEGORIES[kind]) throw fail(400, 'VALIDATION_ERROR', '请选择支出或收入')
+  const category = String(input.category || '')
+  if (!LEDGER_CATEGORIES[kind].some((item) => item[0] === category)) {
+    throw fail(400, 'VALIDATION_ERROR', '分类不正确')
+  }
+  const occurredOn = String(input.occurred_on || '').trim()
+  if (!dates.isDate(occurredOn) || occurredOn < '2000-01-01' || occurredOn > '2100-12-31') {
+    throw fail(400, 'VALIDATION_ERROR', '日期不正确')
+  }
+  const note = String(input.note || '').trim()
+  if (note.length > 200) throw fail(400, 'VALIDATION_ERROR', '备注不能超过 200 字')
+  return { kind, category, amountCents: amountCents(input.amount), occurredOn, note }
+}
+
+function ledgerSummary(where, params) {
+  const rows = database.prepare(`
+    SELECT e.kind, COALESCE(SUM(e.amount_cents), 0) AS amount_cents
+    FROM ledger_entries e
+    JOIN users u ON u.id = e.user_id
+    ${where}
+    GROUP BY e.kind
+  `).all(...params)
+  const expense = rows.find((row) => row.kind === 'expense')?.amount_cents || 0
+  const income = rows.find((row) => row.kind === 'income')?.amount_cents || 0
+  return {
+    expense_cents: expense,
+    income_cents: income,
+    balance_cents: income - expense,
+    expense: formatYuan(expense),
+    income: formatYuan(income),
+    balance: `${income - expense < 0 ? '-' : ''}${formatYuan(income - expense)}`,
+  }
+}
+
+/**
+ * listLedger —— 当前用户某个月的账，含分类汇总。
+ * @param {string} userId
+ * @param {string} [month]
+ */
+function listLedger(userId, month) {
+  const current = ledgerMonth(month)
+  const start = `${current}-01`
+  const end = nextMonthStart(current)
+  const items = database.prepare(`
+    SELECT e.*, u.username
+    FROM ledger_entries e
+    JOIN users u ON u.id = e.user_id
+    WHERE e.user_id = ? AND e.occurred_on >= ? AND e.occurred_on < ?
+    ORDER BY e.occurred_on DESC, e.created_at DESC
+  `).all(userId, start, end).map(presentLedgerEntry)
+  const categories = database.prepare(`
+    SELECT kind, category, SUM(amount_cents) AS amount_cents
+    FROM ledger_entries
+    WHERE user_id = ? AND occurred_on >= ? AND occurred_on < ?
+    GROUP BY kind, category
+    ORDER BY amount_cents DESC
+  `).all(userId, start, end).map((row) => ({
+    kind: row.kind,
+    category: row.category,
+    category_label: ledgerCategoryLabel(row.kind, row.category),
+    amount_cents: row.amount_cents,
+    amount: formatYuan(row.amount_cents),
+  }))
+  return {
+    month: current,
+    summary: ledgerSummary('WHERE e.user_id = ? AND e.occurred_on >= ? AND e.occurred_on < ?', [userId, start, end]),
+    categories,
+    items,
+    catalog: ledgerCatalog(),
+  }
+}
+
+function createLedgerEntry(userId, input) {
+  assertWrites(userId)
+  const value = cleanLedgerInput(input)
+  const now = Date.now()
+  const id = crypto.randomUUID()
+  database.prepare(`
+    INSERT INTO ledger_entries (
+      id, user_id, kind, category, amount_cents, occurred_on, note, created_at, updated_at, version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+  `).run(id, userId, value.kind, value.category, value.amountCents, value.occurredOn, value.note, now, now)
+  return presentLedgerEntry(database.prepare(`
+    SELECT e.*, u.username FROM ledger_entries e JOIN users u ON u.id = e.user_id WHERE e.id = ?
+  `).get(id))
+}
+
+function updateLedgerEntry(userId, entryId, input) {
+  assertWrites(userId)
+  const current = database.prepare('SELECT * FROM ledger_entries WHERE id = ? AND user_id = ?').get(entryId, userId)
+  if (!current) throw fail(404, 'NOT_FOUND', '这笔账不存在')
+  if (Number(input.version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '这笔账已被修改，请刷新后再试')
+  const value = cleanLedgerInput(input)
+  const now = Date.now()
+  const updated = database.prepare(`
+    UPDATE ledger_entries
+    SET kind = ?, category = ?, amount_cents = ?, occurred_on = ?, note = ?, updated_at = ?, version = version + 1
+    WHERE id = ? AND user_id = ? AND version = ?
+  `).run(value.kind, value.category, value.amountCents, value.occurredOn, value.note, now, entryId, userId, current.version)
+  if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '这笔账已被修改，请刷新后再试')
+  return presentLedgerEntry(database.prepare(`
+    SELECT e.*, u.username FROM ledger_entries e JOIN users u ON u.id = e.user_id WHERE e.id = ?
+  `).get(entryId))
+}
+
+function deleteLedgerEntry(userId, entryId, version) {
+  assertWrites(userId)
+  const current = database.prepare('SELECT * FROM ledger_entries WHERE id = ? AND user_id = ?').get(entryId, userId)
+  if (!current) throw fail(404, 'NOT_FOUND', '这笔账不存在')
+  if (Number(version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '这笔账已被修改，请刷新后再试')
+  const removed = database.prepare('DELETE FROM ledger_entries WHERE id = ? AND user_id = ? AND version = ?').run(entryId, userId, current.version)
+  if (removed.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '这笔账已被修改，请刷新后再试')
+}
+
+/**
+ * listAdminLedger —— 管理员查看所有账号的记账。支持账号、类型、月份和分页。
+ * @param {{q?: string, kind?: string, month?: string, page?: number|string, pageSize?: number|string}} query
+ */
+function listAdminLedger({ q, kind, month, page, pageSize } = {}) {
+  const query = String(q || '').trim().toLowerCase()
+  const entryKind = String(kind || '').trim()
+  if (entryKind && entryKind !== 'expense' && entryKind !== 'income') {
+    throw fail(400, 'VALIDATION_ERROR', '类型不正确')
+  }
+  const currentMonth = month === undefined || month === '' ? '' : ledgerMonth(month)
+  const params = []
+  const conditions = []
+  if (query) {
+    const like = `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`
+    conditions.push(`(lower(u.username) LIKE ? ESCAPE '\\' OR lower(e.note) LIKE ? ESCAPE '\\')`)
+    params.push(like, like)
+  }
+  if (entryKind) {
+    conditions.push('e.kind = ?')
+    params.push(entryKind)
+  }
+  if (currentMonth) {
+    conditions.push('e.occurred_on >= ? AND e.occurred_on < ?')
+    params.push(`${currentMonth}-01`, nextMonthStart(currentMonth))
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+  const total = database.prepare(`
+    SELECT COUNT(*) AS n
+    FROM ledger_entries e
+    JOIN users u ON u.id = e.user_id
+    ${where}
+  `).get(...params).n
+  const size = pageSizeNumber(pageSize)
+  const current = pageNumber(page, total, size)
+  const items = database.prepare(`
+    SELECT e.*, u.username
+    FROM ledger_entries e
+    JOIN users u ON u.id = e.user_id
+    ${where}
+    ORDER BY e.occurred_on DESC, e.created_at DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, size, (current - 1) * size).map(presentLedgerEntry)
+  return {
+    items,
+    total,
+    page: current,
+    page_size: size,
+    month: currentMonth || null,
+    summary: ledgerSummary(where, params),
+  }
+}
+
+function ensureLedger() {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ledger_entries (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('expense', 'income')),
+      category TEXT NOT NULL,
+      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      occurred_on TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_ledger_user_date ON ledger_entries(user_id, occurred_on);
+    CREATE INDEX IF NOT EXISTS idx_ledger_date ON ledger_entries(occurred_on);
+  `)
+}
+
 function listAudit() {
   return database.prepare(`
     SELECT a.created_at, a.action, a.result, a.target_type, a.target_id, u.username AS actor
@@ -2295,6 +2570,7 @@ function listAudit() {
 migrate()
 const bootstrapMessages = seedLocalAccounts()
 ensureSaas()
+ensureLedger()
 
 module.exports = {
   databasePath,
@@ -2351,5 +2627,10 @@ module.exports = {
   createSaasPlan,
   updateSaasPlan,
   assignUserPlan,
+  listLedger,
+  createLedgerEntry,
+  updateLedgerEntry,
+  deleteLedgerEntry,
+  listAdminLedger,
   writeAudit,
 }

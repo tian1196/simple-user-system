@@ -11,6 +11,7 @@ export const sitePages = [
   { path: 'register', name: 'site-register', title: '邀请注册', group: 'auth' },
   { path: 'recover', name: 'site-recover', title: '账号恢复', group: 'auth' },
   { path: 'app', name: 'site-devices', title: '我的设备', group: 'member' },
+  { path: 'app/ledger', name: 'site-ledger', title: '记账', group: 'member' },
   { path: 'app/devices/new', name: 'site-device-new', title: '新增设备', group: 'member' },
   { path: 'app/devices/:id', name: 'site-device-detail', title: '设备详情', group: 'member' },
   { path: 'app/account', name: 'site-account', title: '账户与数据', group: 'member' },
@@ -29,6 +30,7 @@ export const routes: RouteRecordRaw[] = [{
         ? () => import('../views/HomeView.vue')
         : page.name === 'site-demo' ? () => import('../views/DemoView.vue')
         : page.name === 'site-devices' ? () => import('../views/DevicesView.vue')
+        : page.name === 'site-ledger' ? () => import('../views/LedgerView.vue')
         : page.name === 'site-device-new' ? () => import('../views/NewDeviceView.vue')
         : page.name === 'site-device-detail' ? () => import('../views/DeviceDetailView.vue')
         : page.name === 'site-account' ? () => import('../views/AccountView.vue')

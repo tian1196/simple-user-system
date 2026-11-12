@@ -8,6 +8,7 @@ import {
   Key,
   Notebook,
   OfficeBuilding,
+  Wallet,
   Odometer,
   Setting,
   Ticket,
@@ -32,6 +33,7 @@ const menu: MenuEntry[] = [
   { path: '/accounts', title: '系统账号', icon: Avatar, permission: 'accounts.manage' },
   { path: '/permissions', title: '权限管理', icon: Key, permission: 'permissions.read' },
   { path: '/saas', title: '套餐工作区', icon: OfficeBuilding, permission: 'saas.manage' },
+  { path: '/ledger', title: '消费记账', icon: Wallet, permission: 'ledger.read' },
   { path: '/settings', title: '运营配置', icon: Setting, permission: 'settings.manage' },
   { path: '/audit', title: '操作审计', icon: Document, permission: 'audit.read' },
 ]

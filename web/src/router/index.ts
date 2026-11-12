@@ -54,6 +54,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '套餐工作区', permission: 'saas.manage' },
       },
       {
+        path: 'ledger',
+        name: 'Ledger',
+        component: () => import('@/views/ledger/index.vue'),
+        meta: { title: '消费记账', permission: 'ledger.read' },
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),

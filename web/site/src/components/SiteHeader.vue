@@ -26,6 +26,7 @@ async function signOut() {
       <nav id="site-navigation" class="site-navigation" :class="{ 'is-open': open }" aria-label="主导航" @keydown.esc="open = false">
         <RouterLink to="/demo" :aria-current="route.name === 'site-demo' ? 'page' : undefined">体验示例</RouterLink>
         <RouterLink to="/about" :aria-current="route.name === 'site-about' ? 'page' : undefined">关于项目</RouterLink>
+        <RouterLink v-if="session.authenticated" to="/app/ledger" :aria-current="route.name === 'site-ledger' ? 'page' : undefined">记账</RouterLink>
         <RouterLink v-if="session.authenticated" to="/app/account">账户与数据</RouterLink>
         <SiteButton to="/app">我的设备</SiteButton>
         <SiteButton v-if="session.authenticated" :loading="busy" @click="signOut">退出登录</SiteButton>
