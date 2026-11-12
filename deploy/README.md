@@ -1,158 +1,115 @@
-# 部署指南（公网服务器）
+# 双站点部署指南
 
-本文档介绍如何把设备台账部署到公网服务器，并以 systemd 常驻、Nginx 对外提供访问。推荐使用一键脚本；需要手动排查时可参考手动步骤。
+同一域名部署普通用户网站 `/`、后台 `/admin/` 和接口 `/api/v1`。Nginx 反向代理至仅监听 `127.0.0.1:3000` 的 Node 服务；Express 提供两个独立 Vue 构建及 SPA 深链接。
 
-> 按公网 IP（无域名）逐步实操、含首次创建 owner 账号：见 [公网部署实操手册.md](./公网部署实操手册.md)。
+## 1. 本地准备部署包
 
-## 一、部署架构
-
-```text
-浏览器
-  │  http(s)://你的域名或IP/        用户站点
-  │  http(s)://你的域名或IP/admin/  Vue 管理后台
-  ▼
-Nginx（80 / 443）
-  │  反向代理 /api 与页面
-  ▼
-Node（systemd 常驻，仅监听 127.0.0.1:3000）
-  │
-  ▼
-/opt/device-ledger/data/ledger.sqlite
-```
-
-目录约定：
-
-| 路径 | 内容 |
-| --- | --- |
-| `/opt/node24` | 独立 Node 24 运行时（不影响系统 Node） |
-| `/opt/device-ledger/app` | 应用代码（含构建好的 `web/dist`） |
-| `/opt/device-ledger/data` | 数据库目录（0700，属主 deviceledger） |
-| `/etc/systemd/system/device-ledger.service` | 系统服务 |
-| `/etc/nginx/conf.d/device-ledger.conf` | Nginx 站点配置 |
-
-## 二、一键部署（推荐）
-
-在**本机项目根目录**执行（需要能 SSH 到服务器）：
+要求 Node `>=24.13.0 <25`，安装项目锁定依赖：
 
 ```bash
-# HTTP（首次验证用）
-sh scripts/deploy.sh
-
-# 指定域名/IP（默认就是 SSH 主机）
-DEPLOY_DOMAIN=ledger.example.com sh scripts/deploy.sh
-
-# HTTPS（需要域名，证书另需申请）
-DEPLOY_DOMAIN=ledger.example.com sh scripts/deploy.sh --https
+npm ci
+npm --prefix web ci
+npm test
+npm run pack
+npm run pack:check
 ```
 
-可配置变量：
+`pack` 会重新构建管理后台 `web/dist` 和用户站 `web/site-dist`，再生成：
+
+- `dist/device-ledger.tar.gz`：服务端、双站点产物、部署工具、源码和依赖锁文件；
+- `dist/device-ledger.tar.gz.sha256`：传输完整性校验；
+- 包内 `release.json`：版本、构建时间、入口信息。
+
+白名单打包不包含本地 `.env`、Vite `.env.*`、数据库、`node_modules`、日志、Git 或旧部署包。`.env.example` 作为配置说明保留。前端默认同源请求 `/api/v1`，后台资源路径固定 `/admin/`；生产构建前不要设置指向本机的 `VITE_API_BASE_URL` 或修改后台 `VITE_BASE`。
+
+`pack:check` 解压实际部署包，在临时目录安装锁定的后端生产依赖，创建临时数据库并分配临时端口；检查 14 条页面路由、双站点入口资源、缓存、404、接口鉴权和数据库就绪。结束自动清理，不使用业务数据库与现有 3000/5174 端口。
+
+额外选项：`npm run pack -- --source` 仅打源码，需自行安装前端依赖并执行 `npm run web:build`；自动部署只接受含双站点构建的包。`--no-build` 可打包刚完成的构建，但不会检测源码是否更新，正式发布推荐默认命令。
+
+## 2. 服务器前提
+
+自动部署支持 Linux x86_64、systemd、root SSH。使用独立 `/opt/node24`，不修改系统 Node；已有不匹配的 `/opt/node24` 会拒绝覆盖。运行时安装脚本锁定版本并校验 [Node 官方 SHA256](https://nodejs.org/download/release/v24.22.2/SHASUMS256.txt)。SSH 主机和公网域名分开设置，不再默认连接某台服务器。
+
+默认目录：
+
+| 路径 | 用途 |
+| --- | --- |
+| `/opt/device-ledger/app` | 当前应用（含双站点构建） |
+| `/opt/device-ledger/previous` | 上一次应用 |
+| `/opt/device-ledger/data/ledger.sqlite` | 业务数据库 |
+| `/opt/device-ledger/backups` | 切换前 SQLite 在线快照 |
+| `/etc/systemd/system/device-ledger.service` | 服务配置 |
+| `/etc/nginx/conf.d/device-ledger.conf` | Nginx 站点配置 |
+
+**首次部署也必须先准备正确的 schema 1 数据库。** 脚本不会创建线上空库、播种演示账号或覆盖数据库。已有服务器保持原库；迁移时先停写并使用 SQLite 在线备份生成一致快照，核对内容，再恢复到目标数据目录并设置 `deviceledger` 所有权、目录 0700、数据库 0600。不要直接复制正在写入的 SQLite 主文件（可能遗漏 WAL）。
+
+设置了 `DATABASE_PATH` 后不会自动生成所有者，也不会在日志打印初始口令；已有 owner 沿用。首次建库与创建所有者须作为单独操作审核执行，可参考 [公网部署实操手册](./公网部署实操手册.md)，不要对已有业务库重跑初始化。
+
+## 3. 执行部署
+
+在本机项目根目录：
+
+```bash
+# HTTP 仅用于初步验证/申请证书
+DEPLOY_HOST=服务器IP DEPLOY_DOMAIN=ledger.example.com npm run deploy
+
+# 已有有效证书时部署 HTTPS
+DEPLOY_HOST=服务器IP DEPLOY_DOMAIN=ledger.example.com npm run deploy:https
+```
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEPLOY_HOST` | `115.190.233.106` | 服务器地址 |
-| `DEPLOY_USER` | `root` | SSH 用户（脚本需要安装系统组件） |
-| `DEPLOY_BASE` | `/opt/device-ledger` | 部署根目录 |
-| `DEPLOY_DOMAIN` | 同 `DEPLOY_HOST` | 对外域名/IP |
+| `DEPLOY_HOST` | 必填 | SSH 主机名或 IPv4 |
+| `DEPLOY_USER` | `root` | SSH 用户；远端操作要求 root |
+| `DEPLOY_BASE` | `/opt/device-ledger` | `/opt/` 下的应用根目录 |
+| `DEPLOY_DOMAIN` | 同 SSH 主机 | 浏览器访问域名或 IPv4，不带协议、端口、路径 |
 
-脚本会自动完成：打包 → 上传解压 → 安装 Node 24 → 安装依赖并构建前端 → 创建系统用户与数据目录 → 安装启用 systemd → 安装并重启 Nginx。
+脚本使用 Bash：手动调用应为 `bash scripts/deploy.sh`，不要使用 `sh`。旧入口 `npm run upload` 也会转调 Bash。
 
-**脚本不会覆盖服务器已有数据库。** 首次上线或升级前建议先备份：
+执行顺序：本地双站构建 → 打包及 SHA256 → 独立上传目录 → 远端部署锁 → 临时版本目录安装生产依赖 → 数据库完整性校验 → 证书和候选 Nginx 配置校验 → 数据库在线备份 → 保留旧应用并切换 → 重启服务 → 数据库就绪与双站点路由验收 → Nginx 校验与重载。
 
-```bash
-install -d -m 0700 /opt/device-ledger/backups
-backup_file="/opt/device-ledger/backups/ledger-$(date +%Y%m%d-%H%M%S).sqlite"
-sqlite3 /opt/device-ledger/data/ledger.sqlite ".timeout 5000" ".backup '$backup_file'"
+切换前失败不替换现有应用；切换后失败会尝试恢复旧应用、systemd 和 Nginx 配置，并恢复原有服务运行状态。失败版本保留在 `failed-*`；数据库不会自动回滚，以免覆盖发布期间业务写入。脚本不执行数据库版本迁移，当前仅支持 schema 1。
+
+## 4. HTTPS
+
+先使域名指向服务器，放行 80/443；3000 不应对公网开放。证书需预先存在：
+
+```text
+/etc/letsencrypt/live/你的域名/fullchain.pem
+/etc/letsencrypt/live/你的域名/privkey.pem
 ```
 
-## 三、HTTPS 证书
+可先 HTTP 部署，再按服务器发行版安装 Certbot，用 `certbot certonly --webroot -w /var/www/html -d 你的域名` 申请证书。HTTP 模板已放行挑战目录；先创建该目录。证书就绪后运行 `deploy:https`，会配置 HTTPS 重定向、实际证书路径和 `COOKIE_SECURE=true`，并将 `APP_ORIGINS` 设置为实际 HTTPS 来源。确认续期任务有效，续期后重载 Nginx。
 
-`--https` 使用的是 HTTPS 模板，证书路径默认指向 Let's Encrypt。用 certbot 自动申请并改写配置：
+部署前检查服务器没有其他站点抢占该域名；脚本不会删除系统默认站点或其他项目配置。
+
+## 5. 上线验收与维护
 
 ```bash
-# CentOS/RHEL
-dnf install -y certbot python3-certbot-nginx
-# Debian/Ubuntu
-apt-get update && apt-get install -y certbot python3-certbot-nginx
-
-certbot --nginx -d ledger.example.com
-systemctl reload nginx
+systemctl status device-ledger --no-pager
+journalctl -u device-ledger -n 50 --no-pager
+curl -f http://127.0.0.1:3000/api/v1/health/ready
+nginx -t
 ```
 
-启用 HTTPS 后务必确认服务端 `COOKIE_SECURE=true`（一键 `--https` 已自动设置）。证书每 90 天到期，certbot 会安装自动续期定时任务。
+浏览器使用最终 HTTPS 地址检查首页、`/admin/`、普通用户注册/登录、设备维护和导出。注册邀请码由后台创建；两个站点登录入口分别管理普通用户与管理员身份。
 
-> 没有域名时无法签发常规可信证书，只能先用 HTTP 或自签证书（浏览器会报警告）。
-
-## 四、首次部署后
-
-1. 打开 `https://你的域名/` 确认用户站点；
-2. 打开 `https://你的域名/admin/` 进入后台；
-3. 首个所有者账号：
-   - 若服务器此前已初始化过，使用已有所有者；
-   - 若为全新空库，查看服务日志获取初始凭据：`journalctl -u device-ledger -n 30`；
-4. 在“系统账号”里创建日常使用的管理员，避免长期只依赖一个 owner。
-
-## 五、常用运维命令
+补充在线备份（以服务账户执行，不复制正在使用的主文件）：
 
 ```bash
-# 服务状态 / 日志
-systemctl status device-ledger
-journalctl -u device-ledger -f
-
-# 重启 / 停止
-systemctl restart device-ledger
-systemctl stop device-ledger
-
-# 健康检查
-curl http://127.0.0.1:3000/api/health
-curl http://127.0.0.1:3000/api/v1/health/ready
-
-# Nginx 校验 / 重载
-nginx -t && systemctl reload nginx
-```
-
-## 六、手动部署（脚本不可用时参考）
-
-```bash
-# 1) 安装 Node 24（上传 deploy/install-node24.sh 后执行）
-sh install-node24.sh
-export PATH=/opt/node24/bin:$PATH
-
-# 2) 放置代码
-mkdir -p /opt/device-ledger/app /opt/device-ledger/data
-# 解压打包文件到 /opt/device-ledger/app
 cd /opt/device-ledger/app
-npm install
-npm --prefix web install
-npm --prefix web build
-
-# 3) 专用用户与权限
-useradd --system --home-dir /opt/device-ledger --shell /usr/sbin/nologin deviceledger
-chown -R deviceledger:deviceledger /opt/device-ledger
-chmod 700 /opt/device-ledger/data
-
-# 4) systemd
-cp deploy/device-ledger.service /etc/systemd/system/
-# 编辑 APP_ORIGINS 为实际来源，HTTPS 下设置 COOKIE_SECURE=true
-systemctl daemon-reload
-systemctl enable --now device-ledger
-
-# 5) Nginx
-cp deploy/nginx-device-ledger.conf /etc/nginx/conf.d/device-ledger.conf
-nginx -t && systemctl restart nginx
+runuser -u deviceledger -- env DATABASE_PATH=/opt/device-ledger/data/ledger.sqlite \
+  /opt/node24/bin/node scripts/backup-database.js \
+  /opt/device-ledger/backups/manual-$(date +%Y%m%d-%H%M%S).sqlite
 ```
 
-## 七、升级
-
-重新执行一键脚本即可：它会替换 `app` 目录代码、重建前端并重启服务；`data` 与 `web/dist` 之外的数据不受影响。升级前请先备份数据库。
-
-## 八、排错
+升级重新运行部署命令即可。按保留策略人工清理历史版本与备份。若需人工恢复代码，停止服务后核对 `previous`、恢复对应配置并重新启动；数据库恢复应单独决策。
 
 | 现象 | 排查 |
 | --- | --- |
-| 页面 502 | `systemctl status device-ledger`，Node 是否启动；端口是否 3000 |
-| 写操作 403「请求来源不正确」 | `APP_ORIGINS` 是否包含浏览器实际地址；Nginx 是否透传 `Host` |
-| 后台登录后频繁掉登录 | HTTP 下 `COOKIE_SECURE` 必须为 false；HTTPS 下建议 true |
-| 服务起不来 | `journalctl -u device-ledger -n 50`，多为数据库路径/版本不符 |
-| 404 刷新丢失 | Nginx/Node 已配置 SPA 回退；确认访问路径在 `/admin/` 下 |
-
-> 安全提醒：不要把本地 `data/ledger.sqlite`、`.env` 或 `node_modules` 上传覆盖服务器。真实权限始终由服务端中间件保证。
+| 数据库预检失败 | 核对路径、schema 1、服务用户权限；不要重新初始化已有库 |
+| 502 | `systemctl status device-ledger` 和服务日志 |
+| 写操作来源错误 | `APP_ORIGINS` 必须与浏览器实际协议和域名一致 |
+| HTTP 登录不保留 | 检查是否错误设置了 `COOKIE_SECURE=true` |
+| HTTPS 模板校验失败 | 核对证书存在、权限及 Nginx TLS 支持 |
+| 页面/资源 404 | 两个构建目录必须同时存在，后台基路径必须为 `/admin/` |

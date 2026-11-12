@@ -62,18 +62,18 @@ npm start
 
 ## 配置与部署
 
-npm 启动脚本自动读取 `.env`。DATABASE_PATH 指定库路径；HOST 默认 127.0.0.1；PORT 默认 3000；APP_ORIGINS 为逗号分隔的允许来源；COOKIE_SECURE=true 为登录 Cookie 添加 Secure 标记。ADMIN_DIST 可覆盖 Vue 管理后台的构建目录（默认 `web/dist`）。
+npm 启动脚本自动读取 `.env`。DATABASE_PATH 指定库路径；HOST 默认 127.0.0.1；PORT 默认 3000；APP_ORIGINS 为逗号分隔的允许来源；COOKIE_SECURE=true 为登录 Cookie 添加 Secure 标记。ADMIN_DIST 可覆盖 Vue 管理后台的构建目录（默认 `web/dist`），SITE_DIST 可覆盖用户站构建目录（默认 `web/site-dist`）。
 
 `deploy/device-ledger.service` 提供 systemd 模板，沿用 /opt/device-ledger/data/ledger.sqlite 和独立 Node 24。部署前核对服务用户、目录与现有数据库，通过 `scripts/db-check.js` 检查连接和完整性。`deploy/install-node24.sh` 是可选的独立 Node 安装脚本。不要上传本地 node_modules、.env 或数据库覆盖服务器数据。
 
 ### 一键部署到公网
 
 ```bash
-sh scripts/deploy.sh                                   # HTTP 首次验证
-DEPLOY_DOMAIN=ledger.example.com sh scripts/deploy.sh --https   # HTTPS
+DEPLOY_HOST=服务器IP npm run deploy                    # HTTP 首次验证
+DEPLOY_HOST=服务器IP DEPLOY_DOMAIN=ledger.example.com npm run deploy:https   # HTTPS
 ```
 
-脚本会安装 Node 24、安装依赖、构建前端、创建系统用户、启用 systemd 常驻与 Nginx，且不覆盖已有数据库。完整架构、HTTPS 证书、运维与排错见 [deploy/README.md](deploy/README.md)。
+`npm run pack` 会同时构建用户站和后台，生成 `dist/device-ledger.tar.gz` 与 SHA256；`npm run pack:check` 可隔离启动验收实际部署包。部署脚本使用 Bash，本地构建后上传，远端校验已有数据库、备份并切换版本，失败时尝试恢复旧代码与配置。不会创建或覆盖业务数据库。完整架构、HTTPS 证书、运维与排错见 [deploy/README.md](deploy/README.md)。
 
 写请求沿用完整业务版的来源校验。管理后台登录使用自研 SVG 图形验证码（无需手机 Authenticator），验证码 5 分钟有效且一次性使用。
 

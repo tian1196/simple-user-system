@@ -1,0 +1,15 @@
+:root {
+  --site-bg: #f8faf8;
+  --site-surface: #ffffff;
+  --site-accent: #285849;
+  --site-accent-hover: #204737;
+  --site-soft: #edf3e9;
+  --site-text: #263e35;
+  --site-muted: #647568;
+  --site-border: #dfe6dc;
+  --site-danger: #974d41;
+  --site-radius: 8px;
+  --site-width: 1248px;
+  --site-gutter: 32px;
+  --site-font: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+}

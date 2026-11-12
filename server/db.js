@@ -961,7 +961,7 @@ function presentLog(row, canVoid) {
 function listLogs(userId, deviceId) {
   ownedDevice(userId, deviceId)
   const logs = database.prepare(`
-    SELECT * FROM maintenance_logs WHERE device_id = ? ORDER BY completed_on DESC, id DESC
+    SELECT * FROM maintenance_logs WHERE device_id = ? ORDER BY completed_on DESC, created_at DESC, id DESC
   `).all(deviceId)
   const plans = database.prepare('SELECT * FROM maintenance_plans WHERE device_id = ?').all(deviceId)
   const planMap = new Map(plans.map((plan) => [plan.id, plan]))
@@ -1001,7 +1001,6 @@ function completePlan(userId, planId, input) {
   if (!requestKey || requestKey.length > 80) throw fail(400, 'VALIDATION_ERROR', '缺少请求标识')
 
   const current = ownedPlan(userId, planId)
-  if (Number(input.version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再登记')
   const fingerprint = sha256(['plan', planId, completedOn, note].join('|'))
   const replay = replayOrConflict(current.device_id, requestKey, fingerprint)
   if (replay) {
@@ -1010,6 +1009,9 @@ function completePlan(userId, planId, input) {
       plan: presentPlan(database.prepare('SELECT * FROM maintenance_plans WHERE id = ?').get(planId)),
     }
   }
+
+  // 同一请求的安全重试应先返回原结果；首次登记仍必须通过版本校验。
+  if (Number(input.version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再登记')
 
   const now = Date.now()
   const nextDue = dates.addDays(completedOn, current.interval_days)
