@@ -17,8 +17,27 @@ export interface LedgerEntry {
   version: number
 }
 
-export interface LedgerMonth {
-  month: string
+export interface LedgerCategoryStat {
+  kind: 'expense' | 'income'
+  category: string
+  category_label: string
+  amount_cents: number
+  amount: string
+  share: number
+}
+
+export interface LedgerDay {
+  date: string
+  expense_cents: number
+  income_cents: number
+  expense: string
+  income: string
+}
+
+export interface LedgerBook {
+  month: string | null
+  from: string
+  to: string
   summary: {
     expense_cents: number
     income_cents: number
@@ -27,19 +46,14 @@ export interface LedgerMonth {
     income: string
     balance: string
   }
-  categories: Array<{
-    kind: 'expense' | 'income'
-    category: string
-    category_label: string
-    amount_cents: number
-    amount: string
-  }>
+  categories: LedgerCategoryStat[]
+  days: LedgerDay[]
   items: LedgerEntry[]
   catalog: { expense: LedgerCategory[]; income: LedgerCategory[] }
 }
 
-export function listLedger(month: string): Promise<LedgerMonth> {
-  return request({ url: '/ledger', params: { month } })
+export function listLedger(range: { from: string; to: string }): Promise<LedgerBook> {
+  return request({ url: '/ledger', params: { from: range.from, to: range.to } })
 }
 
 export function createLedgerEntry(payload: {

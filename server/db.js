@@ -2351,6 +2351,39 @@ function nextMonthStart(month) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-01`
 }
 
+function shiftUtcDate(date, days) {
+  const [year, month, day] = date.split('-').map(Number)
+  const next = new Date(Date.UTC(year, month - 1, day + days))
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-${String(next.getUTCDate()).padStart(2, '0')}`
+}
+
+function ledgerDate(value, label) {
+  const date = String(value || '').trim()
+  if (!dates.isDate(date) || date < '2000-01-01' || date > '2100-12-31') {
+    throw fail(400, 'VALIDATION_ERROR', `${label}不正确`)
+  }
+  return date
+}
+
+/** 月份或闭区间。区间最长 366 天，结束日当天计入。返回的 until 是开区间上界。 */
+function ledgerSpan(input) {
+  const source = typeof input === 'string' ? { month: input } : (input || {})
+  const fromText = String(source.from || '').trim()
+  const toText = String(source.to || '').trim()
+  if (fromText || toText) {
+    if (!fromText || !toText) throw fail(400, 'VALIDATION_ERROR', '请同时填写开始和结束日期')
+    const from = ledgerDate(fromText, '开始日期')
+    const to = ledgerDate(toText, '结束日期')
+    if (from > to) throw fail(400, 'VALIDATION_ERROR', '开始日期不能晚于结束日期')
+    const length = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000)
+    if (length > 366) throw fail(400, 'VALIDATION_ERROR', '区间最长 366 天')
+    return { from, to, until: shiftUtcDate(to, 1), month: null }
+  }
+  const month = ledgerMonth(source.month)
+  const until = nextMonthStart(month)
+  return { from: `${month}-01`, to: shiftUtcDate(until, -1), until, month }
+}
+
 function presentLedgerEntry(row) {
   return {
     id: row.id,
@@ -2405,39 +2438,69 @@ function ledgerSummary(where, params) {
   }
 }
 
-/**
- * listLedger —— 当前用户某个月的账，含分类汇总。
- * @param {string} userId
- * @param {string} [month]
- */
-function listLedger(userId, month) {
-  const current = ledgerMonth(month)
-  const start = `${current}-01`
-  const end = nextMonthStart(current)
-  const items = database.prepare(`
-    SELECT e.*, u.username
+function categoryStats(where, params) {
+  const rows = database.prepare(`
+    SELECT e.kind, e.category, SUM(e.amount_cents) AS amount_cents
     FROM ledger_entries e
     JOIN users u ON u.id = e.user_id
-    WHERE e.user_id = ? AND e.occurred_on >= ? AND e.occurred_on < ?
-    ORDER BY e.occurred_on DESC, e.created_at DESC
-  `).all(userId, start, end).map(presentLedgerEntry)
-  const categories = database.prepare(`
-    SELECT kind, category, SUM(amount_cents) AS amount_cents
-    FROM ledger_entries
-    WHERE user_id = ? AND occurred_on >= ? AND occurred_on < ?
-    GROUP BY kind, category
+    ${where}
+    GROUP BY e.kind, e.category
     ORDER BY amount_cents DESC
-  `).all(userId, start, end).map((row) => ({
+  `).all(...params)
+  const totals = { expense: 0, income: 0 }
+  for (const row of rows) totals[row.kind] += row.amount_cents
+  return rows.map((row) => ({
     kind: row.kind,
     category: row.category,
     category_label: ledgerCategoryLabel(row.kind, row.category),
     amount_cents: row.amount_cents,
     amount: formatYuan(row.amount_cents),
+    share: totals[row.kind] ? Math.round((row.amount_cents * 100) / totals[row.kind]) : 0,
   }))
+}
+
+function dailyStats(where, params) {
+  return database.prepare(`
+    SELECT e.occurred_on AS date,
+      SUM(CASE WHEN e.kind = 'expense' THEN e.amount_cents ELSE 0 END) AS expense_cents,
+      SUM(CASE WHEN e.kind = 'income' THEN e.amount_cents ELSE 0 END) AS income_cents
+    FROM ledger_entries e
+    JOIN users u ON u.id = e.user_id
+    ${where}
+    GROUP BY e.occurred_on
+    ORDER BY e.occurred_on ASC
+  `).all(...params).map((row) => ({
+    date: row.date,
+    expense_cents: row.expense_cents,
+    income_cents: row.income_cents,
+    expense: formatYuan(row.expense_cents),
+    income: formatYuan(row.income_cents),
+  }))
+}
+
+/**
+ * listLedger —— 当前用户一段日期内的账。可传月份，或 from/to 闭区间，并返回分类占比和按日合计。
+ * @param {string} userId
+ * @param {string|{month?: string, from?: string, to?: string}} [query]
+ */
+function listLedger(userId, query) {
+  const span = ledgerSpan(query)
+  const where = 'WHERE e.user_id = ? AND e.occurred_on >= ? AND e.occurred_on < ?'
+  const params = [userId, span.from, span.until]
+  const items = database.prepare(`
+    SELECT e.*, u.username
+    FROM ledger_entries e
+    JOIN users u ON u.id = e.user_id
+    ${where}
+    ORDER BY e.occurred_on DESC, e.created_at DESC
+  `).all(...params).map(presentLedgerEntry)
   return {
-    month: current,
-    summary: ledgerSummary('WHERE e.user_id = ? AND e.occurred_on >= ? AND e.occurred_on < ?', [userId, start, end]),
-    categories,
+    month: span.month,
+    from: span.from,
+    to: span.to,
+    summary: ledgerSummary(where, params),
+    categories: categoryStats(where, params),
+    days: dailyStats(where, params),
     items,
     catalog: ledgerCatalog(),
   }
@@ -2486,16 +2549,18 @@ function deleteLedgerEntry(userId, entryId, version) {
 }
 
 /**
- * listAdminLedger —— 管理员查看所有账号的记账。支持账号、类型、月份和分页。
- * @param {{q?: string, kind?: string, month?: string, page?: number|string, pageSize?: number|string}} query
+ * listAdminLedger —— 管理员查看所有账号的记账。支持账号、类型、月份或日期区间、分页，以及分类和按日统计。
+ * @param {{q?: string, kind?: string, month?: string, from?: string, to?: string, page?: number|string, pageSize?: number|string}} query
  */
-function listAdminLedger({ q, kind, month, page, pageSize } = {}) {
+function listAdminLedger({ q, kind, month, from, to, page, pageSize } = {}) {
   const query = String(q || '').trim().toLowerCase()
   const entryKind = String(kind || '').trim()
   if (entryKind && entryKind !== 'expense' && entryKind !== 'income') {
     throw fail(400, 'VALIDATION_ERROR', '类型不正确')
   }
-  const currentMonth = month === undefined || month === '' ? '' : ledgerMonth(month)
+  const hasRange = String(from || '').trim() || String(to || '').trim()
+  const hasMonth = month !== undefined && month !== ''
+  const span = hasRange || hasMonth ? ledgerSpan(hasRange ? { from, to } : { month }) : null
   const params = []
   const conditions = []
   if (query) {
@@ -2507,9 +2572,9 @@ function listAdminLedger({ q, kind, month, page, pageSize } = {}) {
     conditions.push('e.kind = ?')
     params.push(entryKind)
   }
-  if (currentMonth) {
+  if (span) {
     conditions.push('e.occurred_on >= ? AND e.occurred_on < ?')
-    params.push(`${currentMonth}-01`, nextMonthStart(currentMonth))
+    params.push(span.from, span.until)
   }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
   const total = database.prepare(`
@@ -2533,8 +2598,12 @@ function listAdminLedger({ q, kind, month, page, pageSize } = {}) {
     total,
     page: current,
     page_size: size,
-    month: currentMonth || null,
+    month: span ? span.month : null,
+    from: span ? span.from : null,
+    to: span ? span.to : null,
     summary: ledgerSummary(where, params),
+    categories: categoryStats(where, params),
+    days: span ? dailyStats(where, params) : [],
   }
 }
 

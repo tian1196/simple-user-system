@@ -25,19 +25,41 @@ export interface LedgerSummary {
   balance: string
 }
 
+export interface LedgerCategoryStat {
+  kind: 'expense' | 'income'
+  category: string
+  category_label: string
+  amount_cents: number
+  amount: string
+  share: number
+}
+
+export interface LedgerDay {
+  date: string
+  expense_cents: number
+  income_cents: number
+  expense: string
+  income: string
+}
+
 export interface AdminLedgerPage {
   items: LedgerEntry[]
   total: number
   page: number
   page_size: number
   month: string | null
+  from: string | null
+  to: string | null
   summary: LedgerSummary
+  categories: LedgerCategoryStat[]
+  days: LedgerDay[]
 }
 
 export function getAdminLedger(query: {
   q?: string
   kind?: '' | 'expense' | 'income'
-  month?: string
+  from?: string
+  to?: string
   page: number
   page_size: number
 }): Promise<AdminLedgerPage> {
@@ -48,7 +70,10 @@ export function getAdminLedger(query: {
   const keyword = query.q?.trim()
   if (keyword) params.q = keyword
   if (query.kind) params.kind = query.kind
-  if (query.month) params.month = query.month
+  if (query.from && query.to) {
+    params.from = query.from
+    params.to = query.to
+  }
   return request<AdminLedgerPage>({
     url: '/admin/ledger',
     method: 'get',

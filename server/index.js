@@ -287,7 +287,7 @@ api.delete('/devices/:id', requireUser, handle((req, res) => {
 // ---------- 记账 ----------
 
 api.get('/ledger', requireUser, handle((req, res) => {
-  send(req, res, db.listLedger(req.user.id, req.query.month))
+  send(req, res, db.listLedger(req.user.id, req.query))
 }))
 
 api.post('/ledger', requireUser, handle((req, res) => {
@@ -308,6 +308,8 @@ api.get('/admin/ledger', requireAdmin, requirePermission('ledger.read'), handle(
     q: req.query.q,
     kind: req.query.kind,
     month: req.query.month,
+    from: req.query.from,
+    to: req.query.to,
     page: req.query.page,
     pageSize: req.query.page_size,
   }))
