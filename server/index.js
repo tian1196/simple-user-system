@@ -346,6 +346,62 @@ api.post('/logs/:id/void', requireUser, handle((req, res) => {
 
 // ---------- 待办与数据导出 ----------
 
+// 截图仅经过鉴权接口返回，不挂载到静态目录。
+const feedbackUploadAttempts = new Map()
+function uploadRate(req, res, next) {
+  const now = Date.now()
+  if (feedbackUploadAttempts.size > 10000) for (const [id, list] of feedbackUploadAttempts) if (list.at(-1) < now - 3600000) feedbackUploadAttempts.delete(id)
+  const attempts = (feedbackUploadAttempts.get(req.user.id) || []).filter(time => time > now - 3600000)
+  if (attempts.length >= 30) return fail(req, res, 429, 'RATE_LIMITED', '每小时最多尝试上传30张截图，请稍后再试')
+  attempts.push(now); feedbackUploadAttempts.set(req.user.id, attempts)
+  next()
+}
+function sendScreenshot(req, res, admin) {
+  const file = db.feedback.readAttachment(req.user.id, req.params.id, admin)
+  res.setHeader('Cache-Control', 'private, no-store')
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox")
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Content-Type', file.mime)
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.filename)}`)
+  res.sendFile(file.location)
+}
+api.post('/feedback/attachments', requireUser, uploadRate, express.raw({ type: () => true, limit: '5mb' }), handle((req, res) => {
+  let filename
+  try { filename = decodeURIComponent(String(req.headers['x-file-name'] || '截图')) } catch { return fail(req, res, 400, 'VALIDATION_ERROR', '文件名不正确') }
+  send(req, res, db.feedback.upload(req.user.id, req.body, String(req.headers['content-type'] || '').split(';')[0], filename, req.headers['x-upload-key']), 201)
+}))
+api.get('/feedback/attachments/:id', requireUser, handle((req, res) => sendScreenshot(req, res, false)))
+api.delete('/feedback/attachments/:id', requireUser, handle((req, res) => {
+  db.feedback.removeUpload(req.user.id, req.params.id); res.status(204).end()
+}))
+api.post('/feedback', requireUser, handle((req, res) => send(req, res, db.feedback.submit(req.user.id, req.body), 201)))
+api.get('/feedback', requireUser, handle((req, res) => { res.setHeader('Cache-Control', 'no-store'); send(req, res, db.feedback.list(req.user.id, req.query)) }))
+api.get('/feedback/:id', requireUser, handle((req, res) => { res.setHeader('Cache-Control', 'no-store'); send(req, res, db.feedback.detail(req.user.id, req.params.id)) }))
+api.get('/admin/feedback/stats', requireAdmin, requirePermission('feedback.manage'), handle((req, res) => send(req, res, db.feedback.stats())))
+api.get('/admin/feedback/attachments/:id', requireAdmin, requirePermission('feedback.manage'), handle((req, res) => sendScreenshot(req, res, true)))
+api.get('/admin/feedback', requireAdmin, requirePermission('feedback.manage'), handle((req, res) => { res.setHeader('Cache-Control', 'no-store'); send(req, res, db.feedback.list(null, req.query, true)) }))
+api.get('/admin/feedback/:id', requireAdmin, requirePermission('feedback.manage'), handle((req, res) => { res.setHeader('Cache-Control', 'no-store'); send(req, res, db.feedback.detail(null, req.params.id, true)) }))
+api.patch('/admin/feedback/:id', requireAdmin, requirePermission('feedback.manage'), handle((req, res) => send(req, res, db.feedback.update(req.user.id, req.params.id, req.body, meta(req)))))
+
+api.get('/reminders', requireUser, handle((req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  send(req, res, db.reminders.list(req.user.id))
+}))
+api.get('/reminders/settings', requireUser, handle((req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  send(req, res, db.reminders.settings(req.user.id))
+}))
+api.put('/reminders/settings', requireUser, handle((req, res) => {
+  send(req, res, db.reminders.saveSettings(req.user.id, req.body))
+}))
+api.post('/reminders/snoozes', requireUser, handle((req, res) => {
+  send(req, res, db.reminders.snooze(req.user.id, req.body))
+}))
+api.delete('/reminders/snoozes', requireUser, handle((req, res) => {
+  send(req, res, db.reminders.restore(req.user.id, req.body))
+}))
+
 api.get('/due-items', requireUser, handle((req, res) => {
   send(req, res, db.dueItems(req.user.id, req.query.days || 30))
 }))
@@ -519,6 +575,14 @@ api.get('/health/ready', handle((req, res) => {
 
 // 挂载 /api/v1 全部路由。
 app.use('/api/v1', api)
+app.use('/api/v1', (error, req, res, next) => {
+  if (res.headersSent) return next(error)
+  req.id ||= crypto.randomUUID()
+  if (error.type === 'entity.too.large') return fail(req, res, 413, 'PAYLOAD_TOO_LARGE', '请求过大，截图每张不超过5 MB')
+  if (error.type === 'entity.parse.failed') return fail(req, res, 400, 'VALIDATION_ERROR', '请求内容不正确')
+  console.error(error)
+  fail(req, res, 500, 'INTERNAL_ERROR', '服务器错误')
+})
 
 // HTML 每次校验，避免发布后旧入口引用已移除的资源；Vite 哈希资源可长期缓存。
 const frontendStaticOptions = {

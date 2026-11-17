@@ -22,7 +22,7 @@ npm run invite:create -- 5
 npm start
 ```
 
-`db:init` 只用于新的本地库，拒绝覆盖文件或初始化 /opt/ 路径。设置 DATABASE_PATH 后，服务会验证数据库文件及 schema 1；路径或版本错误会拒绝启动。已有业务库不要重跑初始化。测试只使用临时数据库，不修改业务数据。
+`db:init` 只用于新的本地库，拒绝覆盖文件或初始化 /opt/ 路径。设置 DATABASE_PATH 后，服务会验证数据库文件及 schema 1/2/3；路径或版本错误会拒绝启动。已有业务库不要重跑初始化。测试只使用临时数据库，不修改业务数据。
 
 ### 管理后台开发
 
@@ -56,7 +56,7 @@ npm start
 - `/devices`、`/devices/:id`、`/devices/:id/plans`、`/plans/:id`、`/plans/:id/completions`、`/devices/:id/logs`、`/logs/:id/void`。
 - `/due-items`、`/exports/account`、`/exports/calendar`。
 - `/admin/auth/login`、`/admin/overview`、`/admin/users`、`/admin/invites`、`/admin/accounts`、`/admin/settings`、`/admin/audit-logs`。
-- `/api/health` 为存活检查；`/api/v1/health/ready` 查询并验证实际 schema 1 数据库。
+- `/api/health` 为存活检查；`/api/v1/health/ready` 查询并验证实际数据库结构。
 
 业务响应为 `{ data, request_id }`，错误为 `{ error: { code, message }, request_id }`。注册隐私版本为 `2026-11-05`，密码要求沿用完整业务版的 8–128 字符。CLI 邀请码会统一大写以匹配注册逻辑。
 
@@ -97,3 +97,40 @@ npm run release
 - 图形验证码：管理后台登录需要；用户端登录不需要。
 
 启动、构建、目录结构与部署细节见 [web/README.md](web/README.md)。
+
+## 站内到期提醒
+
+登录后进入 `/app/reminders` 查看逾期、今天、未来30天和已暂缓事项，
+`/app/reminders/settings` 设置保修和维护提醒。默认保修提前7天、维护提前3天。
+角标只统计已进入窗口且未暂缓的事项；未来30天预览可能比角标多。
+暂缓可选明天、3天后、7天后，按北京时间目标日00:00恢复，且不改变原到期日。
+保修不能暂缓到截止日之后。暂停、改期、完成或删除会使旧周期暂缓失效。
+目前只在站内展示，不发送邮件或浏览器推送。
+
+本版本首次启动会将现有 schema 1 增量升级为 schema 2，升级前在数据库同目录
+生成 `ledger.sqlite.pre-reminders-*.sqlite` 一致性快照，并打印路径。备份失败则不升级；
+迁移失败保持原版本。不要对已有数据库重新执行 `db:init`。设置与暂缓记录持久保存，
+纳入账户 JSON 导出，账户注销时级联删除。
+
+这是数据库版本升级。部署前另行备份，确认磁盘空间及数据目录写权限；
+回退到只支持 schema 1 的旧代码前，需停止服务并评估匹配的数据库恢复方案，
+不能只切换应用目录，也不能用旧快照覆盖发布后的新业务写入。
+
+测试：`node --test test/reminders.test.js`；完整检查使用 `npm test` 和 `npm run web:build`。
+
+
+## 用户反馈
+
+用户在 `/app/feedback` 提交问题、建议或体验反馈，在 `/app/feedback/mine` 查看本人记录、处理状态和公开回复。标题1–60字，正文10–2000字；联系方式和诊断信息均为可选。支持最多3张PNG/JPEG/WebP截图，每张不超过5MB，每用户截图总额度50MB；每小时最多提交10条反馈、尝试上传30次。失败重试使用幂等键，未提交截图24小时后清理。
+
+后台 `/admin/feedback` 支持筛选、查询、查看原文和截图、处理状态、公开回复、内部备注与处理历史。仅admin/operator的 `feedback.manage` 权限可访问；内部备注和处理历史不向用户或其数据导出开放。保存使用版本检查，冲突需查看最新内容后重新编辑。
+
+接口：用户 `/api/v1/feedback`、`/api/v1/feedback/:id` 和 `/api/v1/feedback/attachments`；后台 `/api/v1/admin/feedback`（含stats、详情、PATCH处理与受保护的附件读取）。截图不通过公共静态目录提供。
+
+首次启动自动从schema 2升级至3（schema 1先升级提醒），升级前在数据库同目录生成 `.pre-feedback-*.sqlite` 一致性备份，失败则停止升级。不要重新初始化已有库。附件保存在**数据库同目录的 `feedback-attachments/`**，必须保留并给予服务写权限。发布切换应共用持久数据目录，不要将附件放在每次替换的发布目录内。
+
+数据库快照不含截图文件：运维备份与恢复必须配套保存SQLite一致性备份和整个 `feedback-attachments/` 目录；需要严格一致性时短暂停止写入后一起备份。恢复时同时恢复匹配的数据与附件。账户导出含截图base64内容，注销会级联清理本人反馈、历史和截图。图片较多时导出JSON较大。
+
+验证：`node --test test/feedback.test.js`，或完整执行 `npm test` 与 `npm run web:build`。测试使用临时数据库，不写业务数据。
+
+部署现在会先在独立数据库副本上演练升级并核对既有业务表摘要，再短暂停止服务、备份并切换应用。`scripts/backup-database.js` 会同时生成 `.sqlite.attachments/` 目录，包含该快照引用的截图；任何图片复制失败都会让备份整体失败，需重新执行。`deploy/backup.sh` 可用于现有每日备份任务，保留14天；恢复时将配套目录内容恢复到数据目录的 `feedback-attachments/`。

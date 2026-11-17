@@ -1,9 +1,13 @@
+import type { FeedbackDetail } from '../../../shared/feedback'
+import type { ReminderSettings } from './reminders'
 import { request } from './request'
 import type { DeviceSummary, MaintenanceLog, MaintenancePlan } from './devices'
 
 export interface AccountExport {
   schema_version: number
   exported_on: string
+  feedback: (FeedbackDetail & { attachments: (FeedbackDetail['attachments'][number] & { content_base64: string })[] })[]
+  reminders: { settings: ReminderSettings; snoozes: { kind: 'plan' | 'warranty'; target_id: string; due_on: string; until_on: string }[] }
   user: { id: string; username: string }
   devices: (DeviceSummary & { plans: MaintenancePlan[]; logs: MaintenanceLog[] })[]
 }
@@ -23,7 +27,7 @@ export function changePassword(
   })
 }
 export function exportAccount(): Promise<AccountExport> {
-  return request({ url: '/exports/account' })
+  return request({ url: '/exports/account', timeout: 600_000 })
 }
 export function deleteAccount(confirm_username: string): Promise<void> {
   return request({ url: '/me', method: 'delete', data: { confirm_username } })

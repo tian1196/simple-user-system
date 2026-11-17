@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { Component } from 'vue'
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getFeedbackStats } from '@/api/feedback'
 import { useRoute } from 'vue-router'
 import {
   Avatar,
+  ChatDotRound,
   Document,
   Key,
   Notebook,
@@ -30,6 +32,7 @@ const menu: MenuEntry[] = [
   { path: '/dashboard', title: '运营概览', icon: Odometer, permission: 'overview.read' },
   { path: '/users', title: '账号管理', icon: User, permission: 'users.read' },
   { path: '/invites', title: '邀请管理', icon: Ticket, permission: 'invites.manage' },
+  { path: '/feedback', title: '用户反馈', icon: ChatDotRound, permission: 'feedback.manage' },
   { path: '/accounts', title: '系统账号', icon: Avatar, permission: 'accounts.manage' },
   { path: '/permissions', title: '权限管理', icon: Key, permission: 'permissions.read' },
   { path: '/saas', title: '套餐工作区', icon: OfficeBuilding, permission: 'saas.manage' },
@@ -43,11 +46,22 @@ const auth = useAuthStore()
 const appStore = useAppStore()
 
 const collapsed = computed(() => appStore.sidebarCollapsed && !appStore.isMobile)
+const pendingFeedback = ref<number | null>(null)
+let feedbackRun = 0
+async function refreshFeedback() {
+  const run = ++feedbackRun
+  if (!auth.can('feedback.manage')) { pendingFeedback.value = null; return }
+  try { const counts = await getFeedbackStats(); if (run === feedbackRun) pendingFeedback.value = counts.pending } catch { /* 保留上次统计，用户可在列表重试 */ }
+}
+watch(() => [auth.user?.id, route.fullPath], refreshFeedback, { immediate: true })
+onMounted(() => { window.addEventListener('feedback-updated', refreshFeedback); window.addEventListener('focus', refreshFeedback) })
+onBeforeUnmount(() => { feedbackRun++; window.removeEventListener('feedback-updated', refreshFeedback); window.removeEventListener('focus', refreshFeedback) })
 const visibleMenu = computed(() => menu.filter((item) => auth.can(item.permission)))
 
 // 子页面（如后续扩展详情页）仍保持父级菜单高亮
 const activeMenu = computed(() => {
   const path = route.path
+  if (path.startsWith('/feedback')) return '/feedback'
   if (path.startsWith('/users')) return '/users'
   if (path.startsWith('/invites')) return '/invites'
   if (path.startsWith('/permissions')) return '/permissions'
@@ -88,7 +102,7 @@ function handleSelect(): void {
       >
         <el-menu-item v-for="item in visibleMenu" :key="item.path" :index="item.path">
           <el-icon><component :is="item.icon" /></el-icon>
-          <template #title>{{ item.title }}</template>
+          <template #title>{{ item.title }}<span v-if="item.path === '/feedback' && pendingFeedback !== null" class="feedback-menu-count">{{ pendingFeedback }}</span></template>
         </el-menu-item>
       </el-menu>
     </el-scrollbar>
@@ -101,6 +115,7 @@ function handleSelect(): void {
 </template>
 
 <style scoped lang="scss">
+.feedback-menu-count{margin-left:auto;padding:0 7px;line-height:22px;background:#2f6bff;color:white;border-radius:4px;font-size:12px}
 .sidebar {
   position: relative;
   z-index: 30;

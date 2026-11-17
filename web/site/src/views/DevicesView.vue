@@ -127,6 +127,7 @@ onBeforeUnmount(() => {
       <section class="recent-panel" aria-labelledby="my-recent-title">
         <div class="panel-heading">
           <h2 id="my-recent-title">近期事项</h2>
+          <SiteButton to="/app/reminders">待办与稍后提醒</SiteButton>
           <p>逾期与未来 30 天</p>
         </div>
         <ul v-if="due.items.length" class="due-list">

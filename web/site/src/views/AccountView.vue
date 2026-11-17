@@ -166,7 +166,7 @@ async function submit() {
         )
         busy.value = false
         close()
-        notice.value = '完整数据已开始下载。JSON 包含设备、维护计划和历史，不包含登录凭证。'
+        notice.value = '完整数据已开始下载。JSON 包含设备、维护计划、历史、提醒设置和反馈（含截图），不包含登录凭证或内部备注。'
       } else {
         await deleteAccount(confirmUsername.value.trim())
         session.reset()
@@ -232,6 +232,12 @@ async function finish() {
       {{ pageError }} 请点击“导出日历”重试。
     </p>
     <div class="account-sections">
+      <section class="account-panel" aria-labelledby="feedback-entry-title"><div class="section-heading"><h2 id="feedback-entry-title">帮助我们改进</h2></div><p class="section-description">遇到问题，或有新的想法？告诉我们，让设备台账更贴近你的使用习惯。</p><div class="feedback-actions"><SiteButton to="/app/feedback" variant="primary">提交意见反馈</SiteButton><SiteButton to="/app/feedback/mine">我的反馈</SiteButton></div></section>
+      <section class="account-panel" aria-labelledby="reminder-settings-title">
+        <div class="section-heading"><h2 id="reminder-settings-title">提醒设置</h2></div>
+        <p class="section-description">设置保修与维护的提前提醒时间。仅在站内展示，不发送站外通知。</p>
+        <div class="reminder-actions"><SiteButton to="/app/reminders/settings">管理提醒</SiteButton><SiteButton to="/app/reminders">查看待办</SiteButton></div>
+      </section>
       <section class="account-panel" aria-labelledby="plan-title">
         <div class="section-heading">
           <img src="/icons/info.svg" width="24" height="24" alt="" />
@@ -290,7 +296,7 @@ async function finish() {
         <div class="export-row">
           <div>
             <h3>完整数据 JSON</h3>
-            <p>包含设备、维护计划和历史记录，不包含登录凭证。</p>
+            <p>包含设备、维护计划、历史记录及本人反馈和截图，不包含登录凭证。</p>
           </div>
           <SiteButton :disabled="busy || !!recoveryCode" @click="open('export')"
             >导出完整数据</SiteButton

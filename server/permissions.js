@@ -5,6 +5,7 @@
  */
 
 const PERMISSIONS = [
+  { key: 'feedback.manage', name: '用户反馈', description: '查看并处理用户反馈及截图，内部备注只向有权限的管理员展示。' },
   { key: 'overview.read', name: '运营概览', description: '查看用户数、设备数等汇总，不包含私人台账内容。' },
   { key: 'users.read', name: '查看账号', description: '查看普通账号的用户名、状态和设备数量。' },
   { key: 'users.manage', name: '管理账号', description: '停用、恢复普通账号，并重置其登录密码。' },
@@ -34,7 +35,7 @@ const ROLES = [
     description: '处理日常账号和邀请，不能改系统账号、配置和审计。',
     staff: true,
     rank: 1,
-    permissions: ['overview.read', 'users.read', 'users.manage', 'invites.manage', 'permissions.read'],
+    permissions: ['overview.read', 'users.read', 'users.manage', 'invites.manage', 'permissions.read', 'feedback.manage'],
   },
   {
     key: 'support',

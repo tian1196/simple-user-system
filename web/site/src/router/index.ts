@@ -24,6 +24,7 @@ router.beforeEach(async to => {
   return true
 })
 
-router.afterEach(to => {
+router.afterEach((to, _from, failure) => {
+  if (failure) return
   document.title = to.meta.title ? `${to.meta.title} · 设备台账` : '设备台账'
 })

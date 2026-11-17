@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 async function checkRelease(base) {
   const origin = new URL(base)
   const assets = new Set()
-  for (const route of ['/', '/demo', '/login', '/register', '/recover', '/app', '/app/devices/new', '/app/devices/release-check', '/app/account', '/about', '/privacy', '/admin/', '/admin/login', '/admin/users']) {
+  for (const route of ['/', '/demo', '/login', '/register', '/recover', '/app', '/app/devices/new', '/app/devices/release-check', '/app/account', '/app/feedback', '/app/feedback/mine', '/app/reminders', '/app/reminders/settings', '/about', '/privacy', '/admin/', '/admin/login', '/admin/feedback', '/admin/feedback/release-check', '/admin/users']) {
     const response = await fetch(new URL(route, origin), { signal: AbortSignal.timeout(5000) })
     assert.equal(response.status, 200, route)
     const html = await response.text()
@@ -28,7 +28,7 @@ async function checkRelease(base) {
   const ready = await fetch(new URL('/api/v1/health/ready', origin))
   assert.equal(ready.status, 200)
   assert.equal((await ready.json()).ok, true)
-  console.log(`部署验收通过：14 条页面路由、${assets.size} 个入口资源、接口隔离与数据库就绪`)
+  console.log(`部署验收通过：20 条页面路由、${assets.size} 个入口资源、接口隔离与数据库就绪`)
 }
 if (require.main === module) checkRelease(process.argv[2] || 'http://127.0.0.1:3000').catch(error => { console.error(error); process.exitCode = 1 })
 module.exports = { checkRelease }

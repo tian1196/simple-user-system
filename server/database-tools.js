@@ -38,8 +38,20 @@ function openDatabase(filename = process.env.DATABASE_PATH || DEFAULT_PATH) {
     const tables = connection.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name)
     if (TABLES.some(name => !tables.includes(name))) throw new Error('数据库缺少所需表，不能启动。请核对版本，禁止对现有库重跑初始化。')
 
-    // 2) schema 版本必须为 1（PRAGMA user_version 与迁移表双重确认）。
-    if (connection.prepare('PRAGMA user_version').get().user_version !== 1) throw new Error('数据库版本不匹配，当前后端只支持 schema 1。')
+    // 2) 接受可安全升级的 schema 1 及当前 schema 2，并校验迁移记录。
+    const schemaVersion = connection.prepare('PRAGMA user_version').get().user_version
+    if (![1, 2, 3].includes(schemaVersion)) throw new Error('数据库版本不匹配，当前后端只支持 schema 1、2 或 3。')
+    if (schemaVersion >= 2) {
+      if (!connection.prepare("SELECT version FROM schema_migrations WHERE version=2 AND name='002_reminders'").get()) throw new Error('缺少提醒迁移记录')
+      connection.prepare('SELECT user_id,warranty_enabled,warranty_days,maintenance_enabled,maintenance_days,version FROM reminder_settings LIMIT 0')
+      connection.prepare('SELECT user_id,device_id,plan_id,kind,target_id,due_on,until_on,version FROM reminder_snoozes LIMIT 0')
+    }
+    if (schemaVersion === 3) {
+      if (!connection.prepare("SELECT version FROM schema_migrations WHERE version=3 AND name='003_feedback'").get()) throw new Error('缺少反馈迁移记录')
+      connection.prepare('SELECT id,user_id,type,title,content,internal_note,request_key,fingerprint,version FROM feedback LIMIT 0')
+      connection.prepare('SELECT id,user_id,feedback_id,upload_key,fingerprint,filename,mime,size FROM feedback_attachments LIMIT 0')
+      connection.prepare('SELECT feedback_id,actor_id,before_json,after_json FROM feedback_history LIMIT 0')
+    }
     if (!connection.prepare("SELECT version FROM schema_migrations WHERE version=1 AND name='001_initial'").get()) throw new Error('缺少数据库迁移记录。')
 
     // 3) 预编译代表性查询：即使表名相同但字段结构不对，也会在此暴露。
@@ -102,7 +114,7 @@ function checkDatabase(connection) {
   const migration = connection.prepare('SELECT version FROM schema_migrations WHERE version=1').get()
   const counts = connection.prepare('SELECT (SELECT count(*) FROM users) AS users, (SELECT count(*) FROM devices) AS devices').get()
   if (!migration) throw new Error('migration missing')
-  return { connected: true, schema_version: migration.version, journal_mode: connection.prepare('PRAGMA journal_mode').get().journal_mode, foreign_keys: connection.prepare('PRAGMA foreign_keys').get().foreign_keys, counts }
+  return { connected: true, schema_version: connection.prepare('PRAGMA user_version').get().user_version, journal_mode: connection.prepare('PRAGMA journal_mode').get().journal_mode, foreign_keys: connection.prepare('PRAGMA foreign_keys').get().foreign_keys, counts }
 }
 
 module.exports = { openDatabase, transaction, audit, checkDatabase, DEFAULT_PATH, TABLES }

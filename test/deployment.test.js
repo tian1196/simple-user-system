@@ -66,3 +66,31 @@ test('deployment rejects missing host and invalid configuration before upload', 
     assert.equal(spawnSync('bash', ['scripts/deploy.sh'], { env: { ...process.env, ...config } }).status, 2)
   }
 })
+
+
+test('feedback backups pair snapshot references with private files and reject incomplete copies', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-backup-images-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const database = path.join(dir, 'source.sqlite')
+  const env = { ...process.env, DATABASE_PATH: database }
+  assert.equal(spawnSync(process.execPath, ['scripts/db-init.js'], { env }).status, 0)
+  const db = new DatabaseSync(database)
+  require('../server/reminder-migration').migrateReminders(db, database)
+  require('../server/feedback-migration').migrateFeedback(db, database)
+  db.exec("INSERT INTO users(id,username,role) VALUES('backup-user','backup_user','user')")
+  const id = '12345678-1234-4234-8234-123456789012'
+  db.prepare('INSERT INTO feedback_attachments(id,user_id,upload_key,fingerprint,filename,mime,size,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id,'backup-user','backup-upload','hash','photo.png','image/png',5,Date.now())
+  const files = path.join(dir, 'feedback-attachments'); fs.mkdirSync(files)
+  fs.writeFileSync(path.join(files, id+'.bin'), 'image')
+  const target = path.join(dir, 'complete.sqlite')
+  assert.equal(spawnSync(process.execPath, ['scripts/backup-database.js', target], { env }).status, 0)
+  assert.equal(fs.readFileSync(path.join(target+'.attachments', id+'.bin'), 'utf8'), 'image')
+  assert.equal(fs.statSync(path.join(target+'.attachments', id+'.bin')).mode & 0o777, 0o600)
+  fs.unlinkSync(path.join(files, id+'.bin'))
+  const incomplete = path.join(dir, 'incomplete.sqlite')
+  assert.notEqual(spawnSync(process.execPath, ['scripts/backup-database.js', incomplete], { env }).status, 0)
+  assert.equal(fs.existsSync(incomplete), false)
+  assert.equal(fs.existsSync(incomplete+'.attachments'), false)
+  assert.equal(db.prepare('SELECT count(*) n FROM feedback_attachments').get().n, 1)
+  db.close()
+})

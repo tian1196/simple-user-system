@@ -3,6 +3,7 @@
 export type StaffRole = 'admin' | 'operator' | 'support' | 'auditor' | 'partner'
 
 export type PermissionKey =
+  | 'feedback.manage'
   | 'overview.read'
   | 'users.read'
   | 'users.manage'

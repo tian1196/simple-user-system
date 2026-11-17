@@ -29,13 +29,13 @@ test('user site shell keeps SPA deep links, API and admin entry isolated', async
   }
   assert.ok(started, 'server starts')
   const base = 'http://127.0.0.1:31988'
-  for (const route of ['/', '/demo', '/login', '/register', '/recover', '/app', '/app/devices/new', '/app/devices/test-id', '/app/account', '/about', '/privacy']) {
+  for (const route of ['/', '/demo', '/login', '/register', '/recover', '/app', '/app/devices/new', '/app/devices/test-id', '/app/account', '/app/feedback', '/app/feedback/mine', '/app/reminders', '/app/reminders/settings', '/about', '/privacy']) {
     const response = await fetch(base + route)
     assert.equal(response.status, 200, route)
     assert.match(await response.text(), /user-site-shell/, route)
     assert.match(response.headers.get('cache-control'), /no-cache/)
   }
-  for (const route of ['/admin', '/admin/users', '/admin/login']) {
+  for (const route of ['/admin', '/admin/feedback', '/admin/feedback/release-check', '/admin/users', '/admin/login']) {
     assert.match(await (await fetch(base + route)).text(), /admin-shell/, route)
   }
   assert.match(await (await fetch(base + '/shell.js')).text(), /window.siteShell/)

@@ -11,6 +11,10 @@ export const sitePages = [
   { path: 'register', name: 'site-register', title: '邀请注册', group: 'auth' },
   { path: 'recover', name: 'site-recover', title: '账号恢复', group: 'auth' },
   { path: 'app', name: 'site-devices', title: '我的设备', group: 'member' },
+  { path: 'app/feedback', name: 'site-feedback', title: '意见反馈', group: 'member' },
+  { path: 'app/feedback/mine', name: 'site-feedback-mine', title: '我的反馈', group: 'member' },
+  { path: 'app/reminders', name: 'site-reminders', title: '待办提醒', group: 'member' },
+  { path: 'app/reminders/settings', name: 'site-reminder-settings', title: '提醒设置', group: 'member' },
   { path: 'app/ledger', name: 'site-ledger', title: '记账', group: 'member' },
   { path: 'app/devices/new', name: 'site-device-new', title: '新增设备', group: 'member' },
   { path: 'app/devices/:id', name: 'site-device-detail', title: '设备详情', group: 'member' },
@@ -30,6 +34,10 @@ export const routes: RouteRecordRaw[] = [{
         ? () => import('../views/HomeView.vue')
         : page.name === 'site-demo' ? () => import('../views/DemoView.vue')
         : page.name === 'site-devices' ? () => import('../views/DevicesView.vue')
+        : page.name === 'site-feedback' ? () => import('../views/FeedbackView.vue')
+        : page.name === 'site-feedback-mine' ? () => import('../views/MyFeedbackView.vue')
+        : page.name === 'site-reminders' ? () => import('../views/RemindersView.vue')
+        : page.name === 'site-reminder-settings' ? () => import('../views/ReminderSettingsView.vue')
         : page.name === 'site-ledger' ? () => import('../views/LedgerView.vue')
         : page.name === 'site-device-new' ? () => import('../views/NewDeviceView.vue')
         : page.name === 'site-device-detail' ? () => import('../views/DeviceDetailView.vue')

@@ -22,6 +22,8 @@ HAD_SERVICE=0
 HAD_NGINX=0
 SERVICE_INSTALLED=0
 NGINX_INSTALLED=0
+PAUSED=0
+REHEARSAL=
 WAS_ACTIVE=0
 systemctl is-active --quiet device-ledger && WAS_ACTIVE=1
 SERVICE=/etc/systemd/system/device-ledger.service
@@ -47,6 +49,8 @@ rollback() {
     systemctl daemon-reload || true
     if [[ $WAS_ACTIVE = 1 ]]; then systemctl start device-ledger || true; fi
   fi
+  if [[ $status -ne 0 && $PAUSED = 1 && $SWITCHED = 0 && $OLD_MOVED = 0 && $WAS_ACTIVE = 1 ]]; then systemctl start device-ledger || true; fi
+  [[ -z "$REHEARSAL" ]] || rm -rf -- "$REHEARSAL"
   rm -rf -- "$STAGE" "$BACKUP"
   exit "$status"
 }
@@ -93,6 +97,16 @@ sed -e "s#server_name _#server_name $DOMAIN#g" -e "s#live/CHANGE_ME/#live/$DOMAI
 # 切换前校验候选 Nginx 配置，不覆盖当前站点。
 printf 'events {}\nhttp { include %s; }\n' "$BACKUP/new-nginx" > "$BACKUP/nginx-test.conf"
 nginx -t -c "$BACKUP/nginx-test.conf"
+# 先在独立快照上演练升级，不对业务库执行演练写入。
+REHEARSAL=$(mktemp -d "$BASE/.upgrade-check.XXXXXX")
+chown deviceledger:deviceledger "$REHEARSAL"
+runuser -u deviceledger -- env DATABASE_PATH="$BASE/data/ledger.sqlite" \
+  /opt/node24/bin/node scripts/backup-database.js "$REHEARSAL/upgrade.sqlite"
+if [[ -d "$REHEARSAL/upgrade.sqlite.attachments" ]]; then mv "$REHEARSAL/upgrade.sqlite.attachments" "$REHEARSAL/feedback-attachments"; fi
+runuser -u deviceledger -- /opt/node24/bin/node scripts/verify-upgrade.js "$REHEARSAL/upgrade.sqlite"
+rm -rf -- "$REHEARSAL"; REHEARSAL=
+# 短暂停止原服务后备份，确保切换前所有已提交数据和截图均有匹配快照。
+if [[ $WAS_ACTIVE = 1 ]]; then systemctl stop device-ledger; PAUSED=1; fi
 # 快照可用于人工灾难恢复；失败回退不会自动覆盖业务数据库。
 install -d -m 0700 -o deviceledger -g deviceledger "$BASE/backups"
 runuser -u deviceledger -- env DATABASE_PATH="$BASE/data/ledger.sqlite" \

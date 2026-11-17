@@ -45,6 +45,9 @@ fs.mkdirSync(path.dirname(databasePath), { recursive: true })
 const database = process.env.DATABASE_PATH
   ? openDatabase(databasePath).connection
   : new DatabaseSync(databasePath)
+if (!database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").get()) {
+  database.exec(fs.readFileSync(path.join(__dirname, '../migrations/001_initial.sql'), 'utf8'))
+}
 database.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;')
 // 统一事务入口：传入回调，返回一个“执行该事务”的函数。
 database.transaction = callback => () => transaction(database, callback)
@@ -130,7 +133,7 @@ function adminPublicUser(row) {
  *
  * 全部使用 CREATE TABLE IF NOT EXISTS，因此每次启动都可安全执行：
  * 已存在的表不会被修改或清空。当前没有真正的“版本升级”逻辑，
- * 结构固定为 schema 1；需要演进时应新增迁移并同步 schema 版本。
+ * 基础结构及旧版本角色兼容由这里维护；提醒表及版本由增量迁移管理。
  *
  * 通用约定：
  *   - 主键 id 为 UUID 字符串；
@@ -794,13 +797,16 @@ function updateDevice(userId, deviceId, input) {
   if (Number(input.version) !== current.version) throw fail(409, 'VERSION_CONFLICT', '设备已被修改，请刷新后再保存')
   const value = cleanDeviceInput(input)
   const now = Date.now()
-  const result = database.prepare(`
-    UPDATE devices
-    SET name = ?, category = ?, model = ?, purchased_on = ?, warranty_until = ?, note = ?, updated_at = ?, version = version + 1
-    WHERE id = ? AND user_id = ? AND version = ?
-  `).run(value.name, value.category, value.model, value.purchased_on, value.warranty_until, value.note, now, deviceId, userId, current.version)
-  if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '设备已被修改，请刷新后再保存')
-  return presentDevice(database.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId))
+  return database.transaction(() => {
+    const result = database.prepare(`
+      UPDATE devices
+      SET name = ?, category = ?, model = ?, purchased_on = ?, warranty_until = ?, note = ?, updated_at = ?, version = version + 1
+      WHERE id = ? AND user_id = ? AND version = ?
+    `).run(value.name, value.category, value.model, value.purchased_on, value.warranty_until, value.note, now, deviceId, userId, current.version)
+    if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '设备已被修改，请刷新后再保存')
+    if (value.warranty_until !== current.warranty_until) reminders.clearWarranty(deviceId)
+    return presentDevice(database.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId))
+  })()
 }
 
 /**
@@ -915,13 +921,16 @@ function updatePlan(userId, planId, input) {
   if (!dates.isDate(due)) throw fail(400, 'VALIDATION_ERROR', '下次到期日不正确')
   if (!['active', 'paused'].includes(status)) throw fail(400, 'VALIDATION_ERROR', '计划状态不正确')
   const now = Date.now()
-  const result = database.prepare(`
-    UPDATE maintenance_plans
-    SET title = ?, interval_days = ?, next_due_on = ?, status = ?, updated_at = ?, version = version + 1
-    WHERE id = ? AND version = ?
-  `).run(title, interval, due, status, now, planId, current.version)
-  if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再保存')
-  return presentPlan(database.prepare('SELECT * FROM maintenance_plans WHERE id = ?').get(planId))
+  return database.transaction(() => {
+    const result = database.prepare(`
+      UPDATE maintenance_plans
+      SET title = ?, interval_days = ?, next_due_on = ?, status = ?, updated_at = ?, version = version + 1
+      WHERE id = ? AND version = ?
+    `).run(title, interval, due, status, now, planId, current.version)
+    if (result.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再保存')
+    if (due !== current.next_due_on || status !== current.status) reminders.clearPlan(planId)
+    return presentPlan(database.prepare('SELECT * FROM maintenance_plans WHERE id = ?').get(planId))
+  })()
 }
 
 /**
@@ -1047,6 +1056,7 @@ function completePlan(userId, planId, input) {
       WHERE id = ? AND version = ?
     `).run(nextDue, now, planId, current.version)
     if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再登记')
+    reminders.clearPlan(planId)
     database.prepare(`
       INSERT INTO maintenance_logs (
         id, device_id, plan_id, source, title, completed_on, note, request_key, request_fingerprint,
@@ -1147,6 +1157,7 @@ function voidLog(userId, logId) {
     `).run(log.previous_due_on, now, plan.id, plan.version)
     if (updated.changes !== 1) throw fail(409, 'VERSION_CONFLICT', '计划已被修改，请刷新后再试')
     database.prepare('UPDATE maintenance_logs SET voided_at = ? WHERE id = ?').run(now, logId)
+    reminders.clearPlan(plan.id)
   })
   tx()
   const plan = database.prepare('SELECT * FROM maintenance_plans WHERE id = ?').get(log.plan_id)
@@ -1220,6 +1231,8 @@ function exportAccount(userId, token) {
   return {
     schema_version: 1,
     exported_on: todayValue,
+    reminders: reminders.exportData(userId),
+    feedback: feedback.exportUser(userId),
     user,
     devices: devices.map((device) => ({
       ...presentDevice(device, todayValue),
@@ -1276,7 +1289,9 @@ function deleteAccount(userId, username, token) {
   assertReauth(token)
   const user = database.prepare('SELECT * FROM users WHERE id = ?').get(userId)
   if (!user || user.username !== normalizeUsername(username)) throw fail(400, 'VALIDATION_ERROR', '请输入当前用户名确认')
+  const attachmentIds = feedback.userFiles(userId)
   database.prepare('DELETE FROM users WHERE id = ?').run(userId)
+  feedback.purgeFiles(attachmentIds)
   writeAudit({ actorId: userId, action: 'account_delete', result: 'success', requestId: crypto.randomUUID() })
 }
 
@@ -2002,7 +2017,7 @@ function workspaceSummary(row) {
  * listSaas —— 套餐目录和各工作区用量。设备数只做汇总，不返回私人台账。
  * @returns {{plans: object[], tenants: object[]}}
  */
-function presentPlan(row) {
+function presentSaasPlan(row) {
   return {
     id: row.id,
     key: row.key,
@@ -2088,7 +2103,7 @@ function saasAccountById(userId) {
 
 function listSaas() {
   return {
-    plans: database.prepare('SELECT * FROM plans ORDER BY builtin DESC, created_at ASC').all().map(presentPlan),
+    plans: database.prepare('SELECT * FROM plans ORDER BY builtin DESC, created_at ASC').all().map(presentSaasPlan),
     tenants: database.prepare(`
       SELECT t.*,
         (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.role = 'user') AS member_count,
@@ -2192,7 +2207,7 @@ function createSaasPlan(actorId, { name, description, seats, devices }, meta) {
     result: 'success',
     detail: { name: title, seats: seatLimit, devices: deviceLimit },
   })
-  return presentPlan(database.prepare('SELECT * FROM plans WHERE id = ?').get(id))
+  return presentSaasPlan(database.prepare('SELECT * FROM plans WHERE id = ?').get(id))
 }
 
 /**
@@ -2236,7 +2251,7 @@ function updateSaasPlan(actorId, planId, { seats, devices, version }, meta) {
     result: 'success',
     detail: { seats: seatLimit, devices: deviceLimit },
   })
-  return presentPlan(database.prepare('SELECT * FROM plans WHERE id = ?').get(planId))
+  return presentSaasPlan(database.prepare('SELECT * FROM plans WHERE id = ?').get(planId))
 }
 
 /**
@@ -2636,13 +2651,22 @@ function listAudit() {
   `).all()
 }
 
+const reminderBackup = require('./reminder-migration').migrateReminders(database, databasePath)
 migrate()
+const reminders = require('./reminders').createReminders(database, { fail, assertWrites })
+const feedbackBackup = require('./feedback-migration').migrateFeedback(database, databasePath)
+const feedback = require('./feedback').createFeedback(database, { filename: databasePath, fail,
+  assertWrites: () => assertWrites(), audit: writeAudit })
+if (feedbackBackup) console.log(`反馈数据库升级前备份：${feedbackBackup}`)
 const bootstrapMessages = seedLocalAccounts()
 ensureSaas()
 ensureLedger()
+if (reminderBackup) console.log(`提醒数据库升级前备份：${reminderBackup}`)
 
 module.exports = {
   databasePath,
+  reminders,
+  feedback,
   bootstrapMessages,
   POLICY_VERSION,
   CATEGORIES,

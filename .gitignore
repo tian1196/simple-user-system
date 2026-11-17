@@ -15,3 +15,5 @@ coverage/
 
 web/site-dist/
 package-lock.json.before-pull
+
+data/feedback-attachments/

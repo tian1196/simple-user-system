@@ -10,6 +10,8 @@ const routes: RouteRecordRaw[] = [
     component: AdminLayout,
     redirect: '/dashboard',
     children: [
+      { path: 'feedback', name: 'Feedback', component: () => import('@/views/feedback/index.vue'), meta: { title: '用户反馈', permission: 'feedback.manage' } },
+      { path: 'feedback/:id', name: 'FeedbackDetail', component: () => import('@/views/feedback/FeedbackDetail.vue'), meta: { title: '反馈详情', permission: 'feedback.manage' } },
       {
         path: 'dashboard',
         name: 'Dashboard',

@@ -23,7 +23,7 @@ trap 'rm -rf "$STAGING"' EXIT HUP INT TERM
 # 白名单收集：不打包项目根目录，防止带入本地凭据、数据库、其他部署包。
 # 同时过滤子目录中的 Vite 环境配置和开发缓存。
 COPYFILE_DISABLE=1 tar -cf "$STAGING/source.tar" \
-  --exclude=node_modules --exclude=.env --exclude='.env.*' \
+  --exclude=node_modules --exclude=feedback-attachments --exclude=.env --exclude='.env.*' \
   --exclude='*.sqlite*' --exclude='*.db*' --exclude='*.log' \
   --exclude=.DS_Store --exclude='*.tsbuildinfo' \
   --exclude=dist --exclude=site-dist \
