@@ -6,7 +6,7 @@ import SiteButton from '../components/SiteButton.vue'
 import { useFeedbackDraft } from '../stores/feedbackDraft'
 import { useSessionStore } from '../stores/session'
 import { useUnsavedChanges } from '../composables/useUnsavedChanges'
-import { removeFeedbackImage, submitFeedback, uploadFeedbackImage } from '../api/feedback'
+import { submitFeedback, uploadFeedbackImage } from '../api/feedback'
 import { feedbackAttachmentUrl, feedbackKey, feedbackTypes, type FeedbackSubmission } from '../../../shared/feedback'
 const draft = useFeedbackDraft()
 const session = useSessionStore()
@@ -25,9 +25,9 @@ const input = ref<HTMLInputElement | null>(null)
 const dirty = computed(() => Boolean(draft.form.title || draft.form.content || draft.form.contact || draft.attachments.length || uploads.length))
 const { leaveDialog, confirmLeave } = useUnsavedChanges(dirty, busy)
 let active = true
-let attempt = ''; let key = ''
 async function showError(message: string) { error.value = message; await nextTick(); errorElement.value?.focus() }
 async function upload(row: typeof uploads[number]) {
+  if (!active) return
   row.busy = true; row.error = ''
   try {
     const item = await uploadFeedbackImage(row.file, row.key)
@@ -38,11 +38,13 @@ async function upload(row: typeof uploads[number]) {
   finally { row.busy = false }
 }
 async function filesSelected(event: Event) {
+  if (!active) return
   error.value = ''
   const files = Array.from((event.target as HTMLInputElement).files || [])
   ;(event.target as HTMLInputElement).value = ''
   if (draft.attachments.length + uploads.length + files.length > 3) return showError('最多上传3张截图，请先移除不需要的文件。')
   for (const file of files) {
+    if (!active) return
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024 || !file.size) { await showError('请选择不超过5 MB的JPG、PNG或WebP截图。'); continue }
     const row = reactive({ key: feedbackKey(), file, busy: false, error: '' })
     uploads.push(row)
@@ -52,7 +54,7 @@ async function filesSelected(event: Event) {
 async function remove(id: string) {
   if (busy.value) return
   deleting.value = id
-  try { await removeFeedbackImage(id); if (active) draft.attachments = draft.attachments.filter(file => file.id !== id) }
+  try { await draft.removeAttachment(id) }
   catch (cause) { if (active) await showError(cause instanceof Error ? cause.message : '移除失败') }
   finally { deleting.value = '' }
 }
@@ -62,14 +64,12 @@ async function submit() {
   if (!title || Array.from(title).length > 60) return showError('标题需为1–60个字符。')
   if (Array.from(content).length < 10 || Array.from(content).length > 2000) return showError('详细说明需为10–2,000个字符。')
   if (uploads.length) return showError('请先重试或移除上传失败的截图。')
-  const data: FeedbackSubmission = { type: draft.form.type, title, content, contact: draft.form.contact.trim(), attachment_ids: draft.attachments.map(a => a.id), request_key: '', diagnostics_consent: draft.form.consent }
+  const data: Omit<FeedbackSubmission, 'request_key'> = { type: draft.form.type, title, content, contact: draft.form.contact.trim(), attachment_ids: draft.attachments.map(a => a.id), diagnostics_consent: draft.form.consent }
   if (draft.form.consent) data.diagnostics = { page_path: draft.form.source, browser: navigator.userAgent.slice(0, 240) }
-  const current = JSON.stringify(data)
-  if (current !== attempt) { attempt = current; key = feedbackKey() }
-  data.request_key = key
+  const submission: FeedbackSubmission = { ...data, request_key: draft.submissionKey(data) }
   pending.value = true; error.value = ''
   try {
-    const result = await submitFeedback(data)
+    const result = await submitFeedback(submission)
     if (!active) return
     draft.reset(); uploads.splice(0); pending.value = false
     await router.replace({ name: 'site-feedback-mine', query: { feedback: result.id, submitted: result.number } })

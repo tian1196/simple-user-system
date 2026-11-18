@@ -49,6 +49,14 @@ function createFeedback(database, { filename, fail, assertWrites, audit }) {
     return counts
   }
   function list(userId, query = {}, admin = false) {
+    if (!query || typeof query !== 'object' || Array.isArray(query)) throw fail(400, 'VALIDATION_ERROR', '筛选条件不正确')
+    for (const field of ['status', 'type', 'q', 'from', 'to']) {
+      if (query[field] !== undefined && typeof query[field] !== 'string') throw fail(400, 'VALIDATION_ERROR', '筛选条件不正确')
+    }
+    for (const field of ['page', 'page_size']) {
+      const value = query[field]
+      if (value !== undefined && !((typeof value === 'string' && /^[0-9]+$/.test(value)) || (typeof value === 'number' && Number.isInteger(value)))) throw fail(400, 'VALIDATION_ERROR', '分页参数不正确')
+    }
     const where = []; const values = []
     if (!admin) { where.push('f.user_id=?'); values.push(userId) }
     for (const [key, allowed] of [['status', STATUSES], ['type', TYPES]]) {
@@ -70,7 +78,7 @@ function createFeedback(database, { filename, fail, assertWrites, audit }) {
       }
     }
     if (query.from && query.to && query.from > query.to) throw fail(400, 'VALIDATION_ERROR', '开始日期不能晚于结束日期')
-    const page = Number(query.page || 1); const pageSize = Number(query.page_size || 10)
+    const page = Number(query.page ?? 1); const pageSize = Number(query.page_size ?? 10)
     if (!Number.isInteger(page) || page < 1 || page > 100000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 50) throw fail(400, 'VALIDATION_ERROR', '分页参数不正确')
     const sql = `FROM feedback f JOIN users u ON u.id=f.user_id ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`
     const total = database.prepare(`SELECT count(*) AS n ${sql}`).get(...values).n
@@ -79,7 +87,7 @@ function createFeedback(database, { filename, fail, assertWrites, audit }) {
     return { items, total, page, page_size: pageSize, counts: stats(admin ? null : userId) }
   }
   function cleanup(now = Date.now()) {
-    const old = database.prepare('SELECT id FROM feedback_attachments WHERE feedback_id IS NULL AND created_at<?').all(now - DAY)
+    const old = database.prepare('SELECT id FROM feedback_attachments WHERE feedback_id IS NULL AND created_at<=?').all(now - DAY)
     for (const row of old) removeUpload(null, row.id, true)
     // 崩溃或账户删除后遗留的文件，保留24小时后清理；不扫描其他目录。
     const known = new Set(database.prepare('SELECT id FROM feedback_attachments').all().map(r => `${r.id}.bin`))
@@ -122,13 +130,14 @@ function createFeedback(database, { filename, fail, assertWrites, audit }) {
   }
   function readAttachment(userId, id, admin = false) {
     const row = database.prepare(`SELECT * FROM feedback_attachments WHERE id=? ${admin ? 'AND feedback_id IS NOT NULL' : 'AND user_id=?'}`).get(...(admin ? [id] : [id, userId]))
-    if (!row || (!row.feedback_id && row.created_at < Date.now() - DAY)) throw fail(404, 'ATTACHMENT_NOT_FOUND', '截图不存在或已过期')
+    if (!row || (!row.feedback_id && row.created_at <= Date.now() - DAY)) throw fail(404, 'ATTACHMENT_NOT_FOUND', '截图不存在或已过期')
     const location = attachmentPath(id)
     if (!fs.existsSync(location)) throw fail(404, 'ATTACHMENT_NOT_FOUND', '截图文件不存在，请联系管理员')
     return { ...row, location }
   }
   function submit(userId, input) {
     assertWrites()
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail(400, 'VALIDATION_ERROR', '请填写有效反馈')
     const type = input.type
     if (!TYPES.includes(type)) throw fail(400, 'VALIDATION_ERROR', '请选择反馈类型')
     const title = checkText(input.title, 1, 60, '标题'); const content = checkText(input.content, 10, 2000, '详细说明')
@@ -166,6 +175,7 @@ function createFeedback(database, { filename, fail, assertWrites, audit }) {
   }
   function update(actorId, id, input, meta) {
     assertWrites()
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail(400, 'VALIDATION_ERROR', '请填写有效处理结果')
     if (!STATUSES.includes(input.status)) throw fail(400, 'VALIDATION_ERROR', '请选择有效处理状态')
     const reply = checkText(input.reply, 0, 2000, '回复'); const note = checkText(input.internal_note, 0, 2000, '内部备注')
     return transaction(database, () => {

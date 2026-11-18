@@ -1,4 +1,5 @@
 const dates = require('./dates')
+const { transaction } = require('./database-tools')
 const DEFAULTS = Object.freeze({ warranty_enabled: true, warranty_days: 7, maintenance_enabled: true, maintenance_days: 3 })
 
 function createReminders(database, { fail, assertWrites }) {
@@ -59,7 +60,10 @@ function createReminders(database, { fail, assertWrites }) {
     } }
   }
   function currentItem(userId, input, today) {
-    if (!['plan', 'warranty'].includes(input.type) || typeof input.target_id !== 'string' || !dates.isDate(input.due_on)) {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !['plan', 'warranty'].includes(input.type) ||
+      typeof input.target_id !== 'string' || !input.target_id.trim() || !dates.isDate(input.due_on) ||
+      !Number.isInteger(input.source_version) || input.source_version < 1 ||
+      !Number.isInteger(input.snooze_version) || input.snooze_version < 0) {
       throw fail(400, 'VALIDATION_ERROR', '提醒事项不正确')
     }
     const item = list(userId, today).items.find(row => row.type === input.type && row.target_id === input.target_id)
@@ -71,29 +75,34 @@ function createReminders(database, { fail, assertWrites }) {
   }
   function snooze(userId, input, today = dates.today()) {
     assertWrites(userId)
-    if (![1, 3, 7].includes(input.days)) throw fail(400, 'VALIDATION_ERROR', '请选择明天、3天后或7天后')
-    const item = currentItem(userId, input, today)
-    if (!item.in_window) throw fail(422, 'REMINDER_NOT_DUE', '事项尚未进入提醒窗口')
-    const until = dates.addDays(today, input.days)
-    if (item.type === 'warranty' && until > item.due_on) throw fail(422, 'WARRANTY_SNOOZE_LIMIT', '暂缓日期不能超过保修截止日')
-    if (item.snooze_version !== input.snooze_version) {
-      if (item.snoozed_until === until) return list(userId, today)
-      throw fail(409, 'VERSION_CONFLICT', '暂缓状态已更新，请刷新待办')
-    }
-    database.prepare(`INSERT INTO reminder_snoozes(user_id,device_id,plan_id,kind,target_id,due_on,until_on,updated_at)
-      VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,kind,target_id) DO UPDATE SET due_on=excluded.due_on,
-      until_on=excluded.until_on,updated_at=excluded.updated_at,version=reminder_snoozes.version+1`).run(
-      userId, item.device_id, item.plan_id, item.type, item.target_id, item.due_on, until, Date.now())
-    return list(userId, today)
+    if (!input || ![1, 3, 7].includes(input.days)) throw fail(400, 'VALIDATION_ERROR', '请选择明天、3天后或7天后')
+    return transaction(database, () => {
+      const item = currentItem(userId, input, today)
+      if (!item.in_window) throw fail(422, 'REMINDER_NOT_DUE', '事项尚未进入提醒窗口')
+      const until = dates.addDays(today, input.days)
+      if (item.type === 'warranty' && until > item.due_on) throw fail(422, 'WARRANTY_SNOOZE_LIMIT', '暂缓日期不能超过保修截止日')
+      if (item.snooze_version !== input.snooze_version) {
+        if (item.snoozed_until === until) return list(userId, today)
+        throw fail(409, 'VERSION_CONFLICT', '暂缓状态已更新，请刷新待办')
+      }
+      database.prepare(`INSERT INTO reminder_snoozes(user_id,device_id,plan_id,kind,target_id,due_on,until_on,updated_at)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,kind,target_id) DO UPDATE SET due_on=excluded.due_on,
+        until_on=excluded.until_on,updated_at=excluded.updated_at,version=reminder_snoozes.version+1`).run(
+        userId, item.device_id, item.plan_id, item.type, item.target_id, item.due_on, until, Date.now())
+      return list(userId, today)
+    })
   }
   function restore(userId, input, today = dates.today()) {
     assertWrites(userId)
-    const item = currentItem(userId, input, today)
-    if (!item.snooze_version) return list(userId, today)
-    if (item.snooze_version !== input.snooze_version) throw fail(409, 'VERSION_CONFLICT', '暂缓状态已更新，请刷新待办')
-    database.prepare('DELETE FROM reminder_snoozes WHERE user_id=? AND kind=? AND target_id=? AND version=?')
-      .run(userId, item.type, item.target_id, item.snooze_version)
-    return list(userId, today)
+    return transaction(database, () => {
+      const item = currentItem(userId, input, today)
+      if (!item.snoozed_until) return list(userId, today)
+      if (item.snooze_version !== input.snooze_version) throw fail(409, 'VERSION_CONFLICT', '暂缓状态已更新，请刷新待办')
+      // 保留递增版本，避免恢复后再次暂缓重置为1，让旧页面误恢复新的暂缓。
+      database.prepare('UPDATE reminder_snoozes SET until_on=?,updated_at=?,version=version+1 WHERE user_id=? AND kind=? AND target_id=? AND version=?')
+        .run(today, Date.now(), userId, item.type, item.target_id, item.snooze_version)
+      return list(userId, today)
+    })
   }
   function clearPlan(planId) { database.prepare('DELETE FROM reminder_snoozes WHERE plan_id=?').run(planId) }
   function clearWarranty(deviceId) { database.prepare("DELETE FROM reminder_snoozes WHERE kind='warranty' AND device_id=?").run(deviceId) }

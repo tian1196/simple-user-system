@@ -146,6 +146,20 @@ test('real reminder APIs persist across restart and clear old snoozes on plan li
     const result = await req('/reminders/snoozes', 'POST', { ...target(item), days: 1 })
     assert.equal(result.status, 200)
   }
+  const beforeSnooze = (await req('/reminders')).data.items.find(i => i.target_id === plan.id)
+  for (const change of [{ due_on: [beforeSnooze.due_on] }, { source_version: '1' }, { snooze_version: null }]) {
+    assert.equal((await req('/reminders/snoozes', 'POST', { ...target(beforeSnooze), days: 1, ...change })).status, 400)
+    assert.equal((await req('/reminders/snoozes', 'DELETE', { ...target(beforeSnooze), ...change })).status, 400)
+  }
+  await deferPlan()
+  const firstSnooze = (await req('/reminders')).data.items.find(i => i.target_id === plan.id)
+  assert.equal((await req('/reminders/snoozes', 'DELETE', target(firstSnooze))).status, 200)
+  const clearedSnooze = (await req('/reminders')).data.items.find(i => i.target_id === plan.id)
+  assert.equal((await req('/reminders/snoozes', 'POST', { ...target(clearedSnooze), days: 3 })).status, 200)
+  assert.equal((await req('/reminders/snoozes', 'DELETE', target(firstSnooze))).status, 409)
+  const secondSnooze = (await req('/reminders')).data.items.find(i => i.target_id === plan.id)
+  assert.equal(secondSnooze.snoozed_until, dates.addDays(today, 3))
+  assert.equal((await req('/reminders/snoozes', 'DELETE', target(secondSnooze))).status, 200)
   await deferPlan()
   await stop(); await start()
   assert.equal((await req('/reminders')).data.counts.snoozed, 1)
@@ -192,4 +206,58 @@ test('Shanghai midnight expires snoozes even while UTC remains the previous date
   assert.equal(new Date().toISOString().slice(0, 10), '2026-11-13')
   assert.equal(api.list('u1').counts.snoozed, 0)
   assert.equal(api.list('u1').items[0].label, '逾期 3 天')
+})
+
+test('calendar dates handle leap years and month boundaries while rejecting non-string input', () => {
+  assert.equal(dates.isDate('2028-02-29'), true)
+  assert.equal(dates.isDate('2000-02-29'), true)
+  assert.equal(dates.isDate('2100-02-29'), false)
+  assert.equal(dates.isDate('2026-02-29'), false)
+  assert.equal(dates.addDays('2028-02-28', 1), '2028-02-29')
+  assert.equal(dates.addDays('2028-02-29', 1), '2028-03-01')
+  assert.equal(dates.addDays('2027-12-31', 3), '2028-01-03')
+  assert.equal(dates.diffDays('2028-02-28', '2028-03-01'), 2)
+  for (const value of [['2026-11-13'], { value: '2026-11-13' }, null, undefined, 20261113]) {
+    assert.equal(dates.isDate(value), false)
+  }
+})
+
+test('stale restore cannot cancel a new snooze after a restore and snooze cycle', t => {
+  const { db, api } = fixture(t)
+  seed(db)
+  const initial = api.list('u1', '2026-11-13').items.find(i => i.target_id === 'past')
+  const first = api.snooze('u1', { ...target(initial), days: 1 }, '2026-11-13').items.find(i => i.target_id === 'past')
+  const restored = api.restore('u1', target(first), '2026-11-13').items.find(i => i.target_id === 'past')
+  assert.equal(restored.snoozed_until, null)
+  const second = api.snooze('u1', { ...target(restored), days: 3 }, '2026-11-13').items.find(i => i.target_id === 'past')
+  assert.throws(() => api.restore('u1', target(first), '2026-11-13'), e => e.status === 409)
+  assert.equal(api.list('u1', '2026-11-13').items.find(i => i.target_id === 'past').snoozed_until, '2026-11-16')
+  assert.equal(api.restore('u1', target(second), '2026-11-13').counts.snoozed, 0)
+})
+
+test('malformed reminder targets return validation errors without changing state', t => {
+  const { db, api } = fixture(t)
+  seed(db)
+  const item = api.list('u1', '2026-11-13').items.find(i => i.target_id === 'past')
+  for (const change of [{ due_on: ['2026-11-11'] }, { target_id: '' }, { source_version: '1' }, { source_version: -1 }, { snooze_version: -1 }, { snooze_version: null }]) {
+    assert.throws(() => api.snooze('u1', { ...target(item), days: 1, ...change }, '2026-11-13'), e => e.status === 400)
+    assert.throws(() => api.restore('u1', { ...target(item), ...change }, '2026-11-13'), e => e.status === 400)
+  }
+  assert.equal(api.list('u1', '2026-11-13').counts.snoozed, 0)
+})
+
+test('snoozes cross leap day and year boundaries and expire without hiding the original due date', t => {
+  const { db, api } = fixture(t)
+  db.exec("INSERT INTO devices(id,user_id,name) VALUES('boundary','u1','边界设备'); INSERT INTO maintenance_plans(id,device_id,title,interval_days,next_due_on,status) VALUES('leap','boundary','闰日维护',30,'2028-02-28','active'),('year','boundary','跨年维护',30,'2027-12-31','active')")
+  let item = api.list('u1', '2027-12-31').items.find(i => i.target_id === 'year')
+  api.snooze('u1', { ...target(item), days: 3 }, '2027-12-31')
+  assert.equal(api.list('u1', '2028-01-02').items.find(i => i.target_id === 'year').snoozed_until, '2028-01-03')
+  assert.equal(api.list('u1', '2028-01-03').items.find(i => i.target_id === 'year').snoozed_until, null)
+  item = api.list('u1', '2028-02-28').items.find(i => i.target_id === 'leap')
+  api.snooze('u1', { ...target(item), days: 1 }, '2028-02-28')
+  assert.equal(api.list('u1', '2028-02-28').items.find(i => i.target_id === 'leap').snoozed_until, '2028-02-29')
+  const expired = api.list('u1', '2028-02-29').items.find(i => i.target_id === 'leap')
+  assert.equal(expired.snoozed_until, null)
+  assert.equal(expired.due_on, '2028-02-28')
+  assert.equal(expired.label, '逾期 1 天')
 })

@@ -144,6 +144,10 @@ test('real feedback APIs isolate user/admin cookies, preserve replies across res
   async function adminLogin(role){cookie='';const challenge=(await req('/admin/auth/captcha')).data;const result=await req('/admin/auth/login','POST',{username:role+'_qa',password:'feedback-test-password',captcha_id:challenge.captcha_id,captcha_text:challenge.captcha_text});assert.equal(result.status,200);cookie=result.res.headers.get('set-cookie').split(';')[0];return cookie}
   assert.equal((await req('/feedback')).status,401)
   const userCookie=await register('feedback_http_one');cookie=userCookie
+  assert.equal((await req('/feedback?from[]=2026-11-18')).status,400)
+  assert.equal((await req('/feedback?page[]=1')).status,400)
+  const brokenJpeg=Buffer.alloc(26,255);brokenJpeg[1]=216;brokenJpeg[25]=217
+  assert.equal((await req('/feedback/attachments','POST',brokenJpeg,{'Content-Type':'image/jpeg'})).status,400)
   const upload=await req('/feedback/attachments','POST',image('png'),{'Content-Type':'image/png','X-File-Name':encodeURIComponent('截图.png'),'X-Upload-Key':'http-upload-key-001'})
   assert.equal(upload.status,201,JSON.stringify(upload.body))
   assert.equal((await req('/feedback/attachments','POST',Buffer.alloc(5*1024*1024+1),{'Content-Type':'image/png'})).status,413)
@@ -180,4 +184,81 @@ test('real feedback APIs isolate user/admin cookies, preserve replies across res
   assert.equal((await req('/me','DELETE',{confirm_username:'feedback_http_one'})).status,204)
   assert.equal(fs.existsSync(file),false)
   cookie=adminCookie;assert.equal((await req('/admin/feedback/'+id)).status,404)
+})
+
+test('malformed image headers are rejected without crashing or accepting fake WebP frames', t => {
+  const { api } = fixture(t)
+  const jpeg = Buffer.alloc(26, 255); jpeg[1] = 216; jpeg[jpeg.length - 1] = 217
+  assert.equal(imageType(jpeg), null, 'unterminated marker fill bytes are not a JPEG')
+  assert.throws(() => api.upload('u1', jpeg, 'image/jpeg', 'broken.jpg'), e => e.status === 400)
+  const webp = Buffer.alloc(30); webp.write('RIFF'); webp.writeUInt32LE(22, 4); webp.write('WEBP', 8); webp.write('VP8L', 12); webp[20] = 47
+  assert.equal(imageType(webp), null, 'a zero-length VP8L chunk cannot contain image dimensions')
+  const extended = Buffer.alloc(42); extended.write('RIFF'); extended.writeUInt32LE(34, 4); extended.write('WEBP', 8); extended.write('VP8X', 12); extended.writeUInt32LE(10, 16); extended.write('EXIF', 30); extended.writeUInt32LE(4, 34); extended.write('VP8L', 38)
+  assert.equal(imageType(extended), null, 'a codec name inside metadata is not a frame')
+  const png = Buffer.from(image('png')); png[29] ^= 1
+  assert.equal(imageType(png), null, 'PNG header CRC corruption must not be accepted')
+  for (const ext of ['png', 'jpg', 'webp']) assert.ok(imageType(image(ext)), ext)
+})
+
+test('temporary screenshots expire consistently at exactly 24 hours and retries create usable uploads', t => {
+  const { api, db } = fixture(t)
+  const now = Date.parse('2026-11-18T04:00:00Z')
+  t.mock.timers.enable({ apis: ['Date'], now })
+  const a = api.upload('u1', image('png'), 'image/png', 'temporary.png', 'expiry-upload-001')
+  db.prepare('UPDATE feedback_attachments SET created_at=? WHERE id=?').run(now - 86400000, a.id)
+  assert.throws(() => api.readAttachment('u1', a.id), e => e.status === 404)
+  assert.throws(() => api.submit('u1', input({ attachment_ids: [a.id] })), e => e.status === 422)
+  const fresh = api.upload('u1', image('png'), 'image/png', 'temporary.png', 'expiry-upload-001')
+  assert.notEqual(fresh.id, a.id)
+  assert.equal(db.prepare('SELECT count(*) n FROM feedback_attachments WHERE id=?').get(a.id).n, 0)
+  assert.equal(api.submit('u1', input({ attachment_ids: [fresh.id] })).attachments[0].id, fresh.id)
+  t.mock.timers.tick(86400001)
+  api.cleanup()
+  assert.equal(api.readAttachment('u1', fresh.id).id, fresh.id, 'submitted images do not expire with drafts')
+})
+
+test('feedback pagination and filters reject structured values instead of coercing them or throwing 500', t => {
+  const { api } = fixture(t)
+  for (const query of [{ from: ['2026-11-18'] }, { to: ['2026-11-18'] }, { page: ['1'] }, { page: true }, { page_size: ['10'] }, { page: 0 }, { page_size: 0 }, { status: ['pending'] }, { q: { nested: 'text' } }, { page: '1e2' }, { page_size: '0x10' }]) {
+    assert.throws(() => api.list('u1', query), e => e.status === 400, JSON.stringify(query))
+  }
+  assert.equal(api.list('u1', { from: '', to: '', q: '', page: '1', page_size: '10' }).page, 1)
+  assert.throws(() => api.submit('u1', null), e => e.status === 400)
+  assert.throws(() => api.update('admin', 'missing', null, {}), e => e.status === 400)
+})
+
+test('status-only changes preserve public reply timestamps, clearing replies and no-op saves are consistent', t => {
+  const { api } = fixture(t)
+  const now = Date.parse('2026-11-18T04:00:00Z'); t.mock.timers.enable({ apis: ['Date'], now })
+  let record = api.submit('u1', input({ diagnostics_consent: true, diagnostics: { page_path: '/app', browser: 'QA', token: 'PRIVATE_TOKEN' } }))
+  assert.deepEqual(record.diagnostics, { page_path: '/app', browser: 'QA' })
+  record = api.update('admin', record.id, { status: 'processing', reply: '公开回复', internal_note: 'INTERNAL_ONLY', version: record.version }, {})
+  const repliedAt = record.replied_at; const originalVersion = record.version
+  record = api.update('admin', record.id, { status: 'processing', reply: '公开回复', internal_note: 'INTERNAL_ONLY', version: record.version }, {})
+  assert.equal(record.version, originalVersion); assert.equal(record.history.length, 1)
+  t.mock.timers.tick(1000)
+  record = api.update('admin', record.id, { status: 'resolved', reply: '公开回复', internal_note: 'INTERNAL_ONLY', version: record.version }, {})
+  assert.equal(record.replied_at, repliedAt)
+  record = api.update('admin', record.id, { status: 'resolved', reply: '', internal_note: '', version: record.version }, {})
+  assert.equal(record.replied_at, null); assert.equal(record.history.length, 3)
+  const user = api.detail('u1', record.id)
+  assert.equal('history' in user, false); assert.equal(JSON.stringify(user).includes('INTERNAL_ONLY'), false)
+  assert.equal(JSON.stringify(api.exportUser('u1')).includes('PRIVATE_TOKEN'), false)
+})
+
+
+test('image validation preserves transparent and animated WebP support and bounds malformed header reads', () => {
+  // 两张4×4合成图片：透明静态图和红蓝两帧动画，避免依赖系统图片工具。
+  const alpha = 'UklGRl4AAABXRUJQVlA4WAoAAAAQAAAAAwAAAwAAQUxQSAoAAAABB1CyiAhERP8DVlA4IC4AAADQAQCdASoEAAQAAUAmJaACdLoB+AADsAD+6SIf+3Z/XZ/XZ/17f/kFywuuIwAA'
+  const animation = 'UklGRuYAAABXRUJQVlA4WAoAAAASAAAAAwAAAwAAQU5JTQYAAAAAAAAAAABBTk1GWgAAAAAAAAAAAAMAAAMAAGQAAAJBTFBICgAAAAEHULKICERE/wNWUDggMAAAADABAJ0BKgQABAABQCYloAADcAD+6SIf//bs//9uz//27P+vb//8gx/oa/wV3YAAAEFOTUZYAAAAAAAAAAAAAwAAAwAAZAAAAkFMUEgKAAAAAQdQsogIRET/A1ZQOCAuAAAAMAEAnQEqBAAEAAFAJiWgAANwAP76eV///v2l//ftL/+/aX+vb/9CvWX30xcAAA=='
+  assert.equal(imageType(Buffer.from(alpha, 'base64')), 'image/webp')
+  assert.equal(imageType(Buffer.from(animation, 'base64')), 'image/webp')
+  for (const ext of ['png', 'jpg', 'webp']) {
+    const original = image(ext)
+    for (let length = 0; length < original.length; length++) assert.doesNotThrow(() => imageType(original.subarray(0, length)), `${ext} truncated at ${length}`)
+  }
+  for (let length = 24; length < 128; length++) {
+    const malformed = Buffer.alloc(length, 255); malformed[1] = 216; malformed[length - 1] = 217
+    assert.equal(imageType(malformed), null)
+  }
 })

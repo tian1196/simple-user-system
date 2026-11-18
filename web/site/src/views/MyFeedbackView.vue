@@ -4,21 +4,14 @@ import { useRoute } from 'vue-router'
 import PageHeading from '../components/PageHeading.vue'
 import SiteButton from '../components/SiteButton.vue'
 import PageState from '../components/PageState.vue'
-import { getFeedback, listFeedback } from '../api/feedback'
-import { feedbackAttachmentUrl, feedbackDate, feedbackStatuses, feedbackTypes, type FeedbackDetail, type FeedbackList } from '../../../shared/feedback'
+import { getFeedback } from '../api/feedback'
+import { useFeedbackList } from '../composables/useFeedbackList'
+import { feedbackAttachmentUrl, feedbackDate, feedbackStatuses, feedbackTypes, type FeedbackDetail } from '../../../shared/feedback'
 const route = useRoute()
-const data = ref<FeedbackList | null>(null)
-const filter = ref('all'); const page = ref(1); const loading = ref(false); const error = ref('')
+const { data, filter, page, loading, error, load, dispose } = useFeedbackList()
 const selected = ref<FeedbackDetail | null>(null); const detailError = ref(''); const detailLoading = ref(false)
-let listController: AbortController | undefined; let detailController: AbortController | undefined
+let detailController: AbortController | undefined
 const submitted = computed(() => typeof route.query.submitted === 'string' ? route.query.submitted.slice(0, 40) : '')
-async function load() {
-  listController?.abort(); const c = new AbortController(); listController = c
-  loading.value = true; error.value = ''
-  try { const value = await listFeedback({ status: filter.value, page: page.value }, c.signal); if (!c.signal.aborted) data.value = value }
-  catch (cause) { if (!c.signal.aborted) error.value = cause instanceof Error ? cause.message : '加载失败' }
-  finally { if (!c.signal.aborted) loading.value = false }
-}
 async function loadDetail() {
   detailController?.abort(); const id = route.query.feedback; selected.value = null; detailError.value = ''
   if (typeof id !== 'string') { detailLoading.value = false; return }
@@ -28,11 +21,9 @@ async function loadDetail() {
   finally { if (!c.signal.aborted) detailLoading.value = false }
 }
 function refresh() { void load(); void loadDetail() }
-watch(filter, () => { page.value = 1; void load() })
-watch(page, load)
 watch(() => route.query.feedback, loadDetail)
 onMounted(() => { void load(); void loadDetail() })
-onBeforeUnmount(() => { listController?.abort(); detailController?.abort() })
+onBeforeUnmount(() => { dispose(); detailController?.abort() })
 </script>
 <template>
   <div class="feedback-page feedback-mine site-container"><PageHeading title="你的声音，有迹可循" description="这里只展示你提交的反馈，管理员的回复也会保留在这里。" />
